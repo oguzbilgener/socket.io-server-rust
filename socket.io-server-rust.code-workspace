@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "engine_io_parser"
+		}
+	],
+	"settings": {
+		"workbench.preferredDarkColorTheme": "Gentle Monokai",
+		"workbench.colorTheme": "Gentle Monokai",
+		"editor.formatOnSave": true,
+		"editor.defaultFormatter": "rust-lang.rust",
+		"rust.all_features": true
+	}
+}

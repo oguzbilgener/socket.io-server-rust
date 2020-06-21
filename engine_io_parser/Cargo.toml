@@ -1,0 +1,38 @@
+[package]
+name = "engine_io_parser"
+description = "A parser for the engine.io protocol for Socket.IO"
+version = "0.1.0"
+authors = ["Oguz Bilgener <oguz@bilgener.me>"]
+repository = "https://github.com/oguzbilgener/socket.io-server-rust"
+keywords = ["socketio", "engineio", "websocket"]
+license = "MIT"
+edition = "2018"
+
+include = [
+  "CHANGELOG.md",
+  "LICENSE",
+  "README.md",
+  ".gitignore",
+  "Cargo.toml",
+  "src/*.rs",
+  "src/*/*.rs",
+  "tests/*.rs",
+  "benches/**/*.rs"
+]
+
+[dependencies]
+base64 = "0.12.2"
+nom = "^5.1.2"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[test]]
+name = "binary_test"
+
+[[test]]
+name = "string_test"
+
+[[bench]]
+name = "encode_decode"
+harness = false
