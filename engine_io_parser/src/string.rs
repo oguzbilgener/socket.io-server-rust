@@ -1,22 +1,12 @@
-use crate::packet::{Packet, PacketType, ParsePacketError};
+use crate::packet::{Packet, PacketData, PacketType, ParsePacketError};
 use nom::{
     branch::alt, bytes::complete::take, character::complete::char as nom_char,
     character::complete::digit1, multi::fold_many0, Err::Failure, IResult,
 };
+use std::borrow::Cow;
 
 pub mod decoder {
     use super::*;
-
-    /// In string-encoded payloads, each packet may contain string or binary data.
-    /// Binary data in string-encoded payloads is encoded to base64, so
-    /// Otherwise, string data is returned as is.
-    /// Use this enum to figure out if a packet in a payload has binary data
-    ///
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum PacketData<'a> {
-        PlaintextData(&'a str),
-        BinaryData(Vec<u8>),
-    }
 
     /// Decode a packet with string data from a UTF-8 string.
     /// Each packet has a packet type (Open, Close, Message...) and a data section.
@@ -33,10 +23,10 @@ pub mod decoder {
     ///
     /// assert_eq!(decode_packet("4Hello world!"), Ok(Packet {
     ///     packet_type: PacketType::Message,
-    ///     data: "Hello world!",
+    ///     data: "Hello world!".into(),
     /// }))
     /// ```
-    pub fn decode_packet(input: &str) -> Result<Packet<&str>, ParsePacketError> {
+    pub fn decode_packet(input: &str) -> Result<Packet, ParsePacketError> {
         if let Ok((_, packet)) = parse_string_packet(input, None) {
             Ok(packet)
         } else {
@@ -57,8 +47,7 @@ pub mod decoder {
     /// * `input` - a string containing an encoded payload.
     ///
     /// ```rust
-    ///
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::string::decoder::*;
     ///
     /// assert_eq!(
@@ -66,15 +55,15 @@ pub mod decoder {
     ///     Ok(vec![
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::PlaintextData("hello"),
+    ///             data: "hello".into(),
     ///         },
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::PlaintextData("€")
+    ///             data: "€".into()
     ///         }
     ///     ]),
     /// );
-    pub fn decode_payload(input: &str) -> Result<Vec<Packet<PacketData>>, ParsePacketError> {
+    pub fn decode_payload(input: &str) -> Result<Vec<Packet>, ParsePacketError> {
         if let Ok((_, packets)) = parse_string_payload(input) {
             Ok(packets)
         } else {
@@ -88,17 +77,6 @@ pub mod decoder {
 pub mod encoder {
     use super::*;
 
-    /// In string-encoded payloads, each packet may contain string or binary data.
-    /// Binary data in string-encoded payloads is encoded to base64, so
-    /// Otherwise, string data is returned as is.
-    /// Use this enum to indicate if a packet in a payload has binary data
-    ///
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum PacketData<'a> {
-        PlaintextData(&'a str),
-        BinaryData(&'a [u8]),
-    }
-
     /// Encode a packet with string data to a UTF-8 string.
     ///
     /// # Arguments
@@ -107,20 +85,20 @@ pub mod encoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::string::encoder::*;
     ///
     /// assert_eq!(
-    ///     encode_packet(Packet {
+    ///     encode_packet(&Packet {
     ///         packet_type: PacketType::Message,
-    ///         data: "Hello world!",
+    ///         data: "Hello world!".into(),
     ///     }),
     ///     "4Hello world!",
     /// );
     ///
     /// ```
-    pub fn encode_packet(input: Packet<&str>) -> String {
-        serialize_packet(input.packet_type, &PacketData::PlaintextData(input.data))
+    pub fn encode_packet(input: &Packet) -> String {
+        serialize_packet(input)
     }
 
     /// Encode a packet with binary data to a UTF-8 string.
@@ -133,19 +111,19 @@ pub mod encoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::string::encoder::*;
     ///
     /// assert_eq!(
-    ///     encode_base64_packet(Packet {
+    ///     encode_base64_packet(&Packet {
     ///        packet_type: PacketType::Message,
-    ///        data: &[1u8, 2u8, 3u8, 4u8],
+    ///        data: vec![1u8, 2u8, 3u8, 4u8].into(),
     ///     }),
     ///     "4AQIDBA=="
     /// );
     /// ```
-    pub fn encode_base64_packet(input: Packet<&[u8]>) -> String {
-        serialize_packet(input.packet_type, &PacketData::BinaryData(input.data))
+    pub fn encode_base64_packet(input: &Packet) -> String {
+        serialize_packet(&input)
     }
 
     /// Encode a payload containing multiple packets with either binary or string
@@ -157,52 +135,56 @@ pub mod encoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::string::encoder::*;
+    ///
     ///  assert_eq!(
     ///     encode_payload(&[
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::PlaintextData("€"),
+    ///             data: "€".into(),
     ///         },
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::BinaryData(&[1, 2, 3, 4])
+    ///             data: vec![1u8, 2u8, 3u8, 4u8].into(),
     ///         }
     ///     ]),
     ///     "2:4€10:b4AQIDBA=="
     /// );
     /// ```
-    pub fn encode_payload(input: &[Packet<PacketData>]) -> String {
+    pub fn encode_payload(input: &[Packet]) -> String {
         serialize_payload(input)
     }
 }
 
-fn parse_string_packet<'a>(
-    input: &'a str,
-    data_length: Option<usize>,
-) -> IResult<&'a str, Packet<&'a str>> {
+fn parse_string_packet<'a>(input: &'a str, data_length: Option<usize>) -> IResult<&'a str, Packet> {
     let (input, packet_type_index) = take_u8(input)?;
     let (input, data) = match data_length {
         Some(l) => take(l)(input)?,
         None => ("", input),
     };
     let packet_type = PacketType::parse_from_u8(packet_type_index, input)?;
-    Ok((input, Packet { packet_type, data }))
+    Ok((
+        input,
+        Packet {
+            packet_type,
+            data: PacketData::Plaintext(Cow::Borrowed(data)),
+        },
+    ))
 }
 
-fn parse_string_payload(input: &str) -> IResult<&str, Vec<Packet<decoder::PacketData>>> {
+fn parse_string_payload(input: &str) -> IResult<&str, Vec<Packet>> {
     fold_many0(
         parse_string_packet_in_payload,
         Vec::new(),
-        |mut acc: Vec<Packet<decoder::PacketData>>, item| {
+        |mut acc: Vec<Packet>, item| {
             acc.push(item);
             acc
         },
     )(input)
 }
 
-fn parse_string_packet_in_payload(input: &str) -> IResult<&str, Packet<decoder::PacketData>> {
+fn parse_string_packet_in_payload(input: &str) -> IResult<&str, Packet> {
     // string packet length in a payload is the actual packet data character length + 1 (packet type)
     let (input, packet_length) = take_usize(input)?;
     // Take the colon which is the string separator
@@ -216,24 +198,14 @@ fn parse_string_packet_in_payload(input: &str) -> IResult<&str, Packet<decoder::
     Ok((input, packet))
 }
 
-fn parse_plaintext_string_packet(
-    data_length: usize,
-) -> impl Fn(&str) -> IResult<&str, Packet<decoder::PacketData>> {
+fn parse_plaintext_string_packet(data_length: usize) -> impl Fn(&str) -> IResult<&str, Packet> {
     move |input: &str| {
         let (input, packet) = parse_string_packet(input, Some(data_length))?;
-        Ok((
-            input,
-            Packet {
-                packet_type: packet.packet_type,
-                data: decoder::PacketData::PlaintextData(packet.data),
-            },
-        ))
+        Ok((input, packet))
     }
 }
 
-fn parse_base64_string_packet(
-    data_length: usize,
-) -> impl Fn(&str) -> IResult<&str, Packet<decoder::PacketData>> {
+fn parse_base64_string_packet(data_length: usize) -> impl Fn(&str) -> IResult<&str, Packet> {
     move |input: &str| {
         // base64-encoded data starts with b and counts for the data length
         let (input, _) = nom_char('b')(input)?;
@@ -246,7 +218,7 @@ fn parse_base64_string_packet(
                 input,
                 Packet {
                     packet_type,
-                    data: decoder::PacketData::BinaryData(vec),
+                    data: PacketData::Binary(Cow::Owned(vec)),
                 },
             )),
             Err(_) => Err(Failure((input, nom::error::ErrorKind::TakeWhile1))),
@@ -254,27 +226,32 @@ fn parse_base64_string_packet(
     }
 }
 
-fn serialize_packet(packet_type: PacketType, data: &encoder::PacketData) -> String {
-    let packet_type_int = packet_type as u8;
-    let data: String = match data {
-        encoder::PacketData::PlaintextData(data) => data.to_string(),
-        encoder::PacketData::BinaryData(data) => base64::encode(data),
+fn serialize_packet(packet: &Packet) -> String {
+    let packet_type_int = packet.packet_type as u8;
+    let data: String = match &packet.data {
+        PacketData::Plaintext(data) => data.to_string(),
+        PacketData::Binary(data) => base64::encode(data),
+        PacketData::Empty => String::from(""),
     };
     packet_type_int.to_string() + &data
 }
 
-fn serialize_payload(packets: &[Packet<encoder::PacketData>]) -> String {
-    packets.iter().fold(String::from(""), |acc, packet| {
-        let serialized = serialize_packet(packet.packet_type, &packet.data);
-        acc + &(match &packet.data {
-            encoder::PacketData::BinaryData(_) => {
-                // Adding + 1 to the length because of the `b` character indicating base64-encoded data.
-                (serialized.chars().count() + 1).to_string() + ":b" + &serialized
-            }
-            encoder::PacketData::PlaintextData(_) => {
-                serialized.chars().count().to_string() + ":" + &serialized
-            }
-        })
+fn serialize_payload(packets: &[Packet]) -> String {
+    packets.iter().fold(String::from(""), |mut acc, packet| {
+        let serialized = serialize_packet(&packet);
+        acc.push_str(
+            &(match &packet.data {
+                PacketData::Binary(_) => {
+                    // Adding + 1 to the length because of the `b` character indicating base64-encoded data.
+                    (serialized.chars().count() + 1).to_string() + ":b" + &serialized
+                }
+                PacketData::Plaintext(_) => {
+                    serialized.chars().count().to_string() + ":" + &serialized
+                }
+                PacketData::Empty => String::from(""),
+            }),
+        );
+        acc
     })
 }
 

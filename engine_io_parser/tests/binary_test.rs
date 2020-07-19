@@ -1,6 +1,7 @@
 use engine_io_parser::binary::decoder;
 use engine_io_parser::binary::encoder;
 use engine_io_parser::packet::*;
+use std::borrow::Cow;
 
 #[test]
 fn decodes_packet() {
@@ -9,7 +10,7 @@ fn decodes_packet() {
         result,
         Packet {
             packet_type: PacketType::Close,
-            data: "asdf abc".as_bytes(),
+            data: "asdf abc".as_bytes().into(),
         }
     );
 }
@@ -22,7 +23,7 @@ fn decodes_binary_payload() {
         result[0],
         Packet {
             packet_type: PacketType::Message,
-            data: decoder::PacketData::BinaryData(b"qqq 123"),
+            data: "qqq 123".as_bytes().into(),
         }
     );
 }
@@ -40,12 +41,9 @@ fn decodes_multi_payload() {
     assert_eq!(packet1.packet_type, PacketType::Message);
     assert_eq!(packet2.packet_type, PacketType::Ping);
     assert_eq!(packet3.packet_type, PacketType::Upgrade);
-    assert_eq!(packet1.data, decoder::PacketData::BinaryData(b"qqq 1235"));
-    assert_eq!(packet2.data, decoder::PacketData::BinaryData(b"abcd12"));
-    assert_eq!(
-        packet3.data,
-        decoder::PacketData::BinaryData(b"abcdq\nwerzx")
-    );
+    assert_eq!(packet1.data, "qqq 1235".as_bytes().into());
+    assert_eq!(packet2.data, "abcd12".as_bytes().into());
+    assert_eq!(packet3.data, "abcdq\nwerzx".as_bytes().into());
 }
 
 #[test]
@@ -55,11 +53,11 @@ fn decodes_mixed_payload() {
         Ok(vec![
             Packet {
                 packet_type: PacketType::Message,
-                data: decoder::PacketData::PlaintextData("€"),
+                data: "€".into(),
             },
             Packet {
                 packet_type: PacketType::Message,
-                data: decoder::PacketData::BinaryData(&[1, 2, 3, 4])
+                data: PacketData::Binary(Cow::Owned(vec![1u8, 2u8, 3u8, 4u8]))
             }
         ])
     );
@@ -68,16 +66,16 @@ fn decodes_mixed_payload() {
 #[test]
 fn encodes_binary_packet() {
     assert_eq!(
-        encoder::encode_packet(Packet {
+        encoder::encode_packet(&Packet {
             packet_type: PacketType::Upgrade,
-            data: b"hello world",
+            data: "hello world".as_bytes().into(),
         }),
         b"\x05hello world"
     );
     assert_eq!(
-        encoder::encode_packet(Packet {
+        encoder::encode_packet(&Packet {
             packet_type: PacketType::Message,
-            data: &[16u8, 8u8, 4u8, 2u8],
+            data: PacketData::Binary(Cow::Owned(vec![16u8, 8u8, 4u8, 2u8])),
         }),
         b"\x04\x10\x08\x04\x02"
     );
@@ -86,11 +84,11 @@ fn encodes_binary_packet() {
 #[test]
 fn encodes_binary_payload() {
     assert_eq!(
-        encoder::encode_packet(Packet {
+        encoder::encode_payload(&[Packet {
             packet_type: PacketType::Message,
-            data: &[0x54, 0x32, 0x18, 0x22, 0x44, 0x58],
-        }),
-        b"\x04\x54\x32\x18\x22\x44\x58"
+            data: PacketData::Binary(Cow::Owned(vec![0x54, 0x32, 0x18, 0x22, 0x44, 0x58])),
+        }]),
+        b"\x01\x07\xff\x04\x54\x32\x18\x22\x44\x58"
     )
 }
 
@@ -100,11 +98,11 @@ fn encodes_plaintext_binary_payload() {
         encoder::encode_payload(&[
             Packet {
                 packet_type: PacketType::Message,
-                data: encoder::PacketData::PlaintextData("hello"),
+                data: "hello".into(),
             },
             Packet {
                 packet_type: PacketType::Ping,
-                data: encoder::PacketData::PlaintextData("€")
+                data: "€".into()
             }
         ]),
         b"\x00\x06\xff\x34hello\x00\x04\xff\x32\xe2\x82\xac"
@@ -117,11 +115,11 @@ fn encodes_mixed_binary_payload() {
         encoder::encode_payload(&[
             Packet {
                 packet_type: PacketType::Message,
-                data: encoder::PacketData::PlaintextData("€"),
+                data: "€".into(),
             },
             Packet {
                 packet_type: PacketType::Message,
-                data: encoder::PacketData::BinaryData(&[1, 2, 3, 4])
+                data: PacketData::Binary(Cow::Owned(vec![1, 2, 3, 4]))
             }
         ]),
         b"\x00\x04\xff\x34\xe2\x82\xac\x01\x05\xff\x04\x01\x02\x03\x04"

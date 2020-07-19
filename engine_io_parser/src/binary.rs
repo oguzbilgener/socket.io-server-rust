@@ -1,21 +1,12 @@
-use crate::packet::{Packet, PacketType, ParsePacketError};
+use crate::packet::{Packet, PacketData, PacketType, ParsePacketError};
 use nom::{
     bytes::complete::take, bytes::complete::take_till1, character::complete::digit1,
     error::ErrorKind, multi::fold_many0, number::complete::le_u8, Err::Failure, IResult,
 };
+use std::borrow::Cow;
 
 pub mod decoder {
     use super::*;
-
-    /// In binary-encoded payloads, each packet may contain string or binary data.
-    /// If a packet in a payload has string data, it's parsed as a UTF-8 string.
-    /// Use this enum to figure out if a packet in a payload has string data
-    ///
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum PacketData<'a> {
-        PlaintextData(&'a str),
-        BinaryData(&'a [u8]),
-    }
 
     /// Decode a packet with binary data from a u8 slice.
     /// Each packet has a packet type (Open, Close, Message...) and a data section.
@@ -27,15 +18,15 @@ pub mod decoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::binary::decoder::*;
     ///
     /// assert_eq!(decode_packet(&[4u8, 1u8, 2u8, 3u8, 4u8]), Ok(Packet {
     ///     packet_type: PacketType::Message,
-    ///     data: &(vec![1, 2, 3, 4])[..],
+    ///     data: vec![1, 2, 3, 4].into(),
     /// }))
     /// ```
-    pub fn decode_packet(input: &[u8]) -> Result<Packet<&[u8]>, ParsePacketError> {
+    pub fn decode_packet(input: &[u8]) -> Result<Packet, ParsePacketError> {
         if let Ok((_, packet)) = parse_binary_data_packet(input, None) {
             Ok(packet)
         } else {
@@ -58,7 +49,7 @@ pub mod decoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::binary::decoder::*;
     ///
     /// assert_eq!(
@@ -66,16 +57,16 @@ pub mod decoder {
     ///     Ok(vec![
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::PlaintextData("€"),
+    ///             data: "€".into(),
     ///         },
     ///         Packet {
     ///             packet_type: PacketType::Message,
-    ///             data: PacketData::BinaryData(&[1, 2, 3, 4])
+    ///             data: vec![1u8, 2u8, 3u8, 4u8].into()
     ///         }
     ///     ])
     /// );
     /// ```
-    pub fn decode_payload(input: &[u8]) -> Result<Vec<Packet<PacketData>>, ParsePacketError> {
+    pub fn decode_payload(input: &[u8]) -> Result<Vec<Packet>, ParsePacketError> {
         if let Ok((_, packets)) = parse_binary_payload(input) {
             Ok(packets)
         } else {
@@ -89,15 +80,6 @@ pub mod decoder {
 pub mod encoder {
     use super::*;
 
-    /// In binary-encoded payloads, each packet may contain string or binary data.
-    /// If a packet in a payload has string data, it's parsed as a UTF-8 string.
-    /// Use this enum to indicate the data type of each packet in a payload.
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum PacketData<'a> {
-        PlaintextData(&'a str),
-        BinaryData(&'a [u8]),
-    }
-
     /// Encode a packet with binary data to a byte array.
     ///
     /// # Arguments
@@ -106,19 +88,19 @@ pub mod encoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::binary::encoder::*;
     ///
     /// assert_eq!(
-    ///     encode_packet(Packet {
+    ///     encode_packet(&Packet {
     ///         packet_type: PacketType::Message,
-    ///         data: &[16u8, 8u8, 4u8, 2u8],
+    ///         data: vec![16u8, 8u8, 4u8, 2u8].into(),
     ///     }),
     ///     b"\x04\x10\x08\x04\x02"
     /// );
     /// ```
-    pub fn encode_packet(input: Packet<&[u8]>) -> Vec<u8> {
-        serialize_packet(input.packet_type, input.data)
+    pub fn encode_packet(input: &Packet) -> Vec<u8> {
+        serialize_packet(input.packet_type, &input.data)
     }
 
     /// Encode a payload containing multiple packets with either binary or string
@@ -133,32 +115,29 @@ pub mod encoder {
     /// # Example
     ///
     /// ```rust
-    /// use engine_io_parser::packet::{Packet, PacketType};
+    /// use engine_io_parser::packet::{Packet, PacketData, PacketType};
     /// use engine_io_parser::binary::encoder::*;
     ///
     /// assert_eq!(
     ///    encode_payload(&[
     ///        Packet {
     ///            packet_type: PacketType::Message,
-    ///            data: PacketData::PlaintextData("€"),
+    ///            data: "€".into(),
     ///        },
     ///        Packet {
     ///            packet_type: PacketType::Message,
-    ///            data: PacketData::BinaryData(&[1, 2, 3, 4])
+    ///            data: vec![1u8, 2u8, 3u8, 4u8].into()
     ///        }
     ///    ]),
     ///    b"\x00\x04\xff\x34\xe2\x82\xac\x01\x05\xff\x04\x01\x02\x03\x04"
     ///);
     /// ```
-    pub fn encode_payload<'a>(input: &'a [Packet<PacketData>]) -> Vec<u8> {
+    pub fn encode_payload<'a>(input: &'a [Packet]) -> Vec<u8> {
         serialize_payload(input)
     }
 }
 
-fn parse_binary_data_packet(
-    input: &[u8],
-    data_length: Option<usize>,
-) -> IResult<&[u8], Packet<&[u8]>> {
+fn parse_binary_data_packet(input: &[u8], data_length: Option<usize>) -> IResult<&[u8], Packet> {
     // In binary data  packets, the packet type is encoded in binary
     let (input, packet_type_index) = le_u8(input)?;
     let take_amount = match data_length {
@@ -167,10 +146,16 @@ fn parse_binary_data_packet(
     };
     let (input, data) = take(take_amount)(input)?;
     let packet_type = PacketType::parse_from_u8(packet_type_index, input)?;
-    Ok((input, Packet { packet_type, data }))
+    Ok((
+        input,
+        Packet {
+            packet_type,
+            data: PacketData::Binary(Cow::Borrowed(data)),
+        },
+    ))
 }
 
-fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], Packet<&str>> {
+fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], Packet> {
     // In string data packets, the packet type is encoded in ASCII
     let (input, packet_type_ascii) = digit1(input)?;
     let (input, data) = take(data_length)(input)?;
@@ -180,7 +165,7 @@ fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], 
             input,
             Packet {
                 packet_type,
-                data: parsed_str,
+                data: PacketData::Plaintext(Cow::Borrowed(parsed_str)),
             },
         )),
         Err(_) => Err(nom::Err::Failure((
@@ -190,18 +175,18 @@ fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], 
     }
 }
 
-fn parse_binary_payload(input: &[u8]) -> IResult<&[u8], Vec<Packet<decoder::PacketData>>> {
+fn parse_binary_payload(input: &[u8]) -> IResult<&[u8], Vec<Packet>> {
     fold_many0(
         parse_binary_packet_in_payload,
         Vec::new(),
-        |mut acc: Vec<Packet<decoder::PacketData>>, item| {
+        |mut acc: Vec<Packet>, item| {
             acc.push(item);
             acc
         },
     )(input)
 }
 
-fn parse_binary_packet_in_payload(input: &[u8]) -> IResult<&[u8], Packet<decoder::PacketData>> {
+fn parse_binary_packet_in_payload(input: &[u8]) -> IResult<&[u8], Packet> {
     let (input, packet_data_type) = parse_packet_data_type_in_binary_payload(input)?;
     // binary packet length in a payload is the actual packet data length + 1 (packet type)
     let (input, packet_length) = parse_packet_length(input)?;
@@ -210,24 +195,11 @@ fn parse_binary_packet_in_payload(input: &[u8]) -> IResult<&[u8], Packet<decoder
     if packet_data_type == 0u8 {
         // String data. Try to parse the data as an utf8 string just like the original JS library does.
         let (input, packet) = parse_string_data_packet(input, (packet_length - 1) as usize)?;
-        Ok((
-            input,
-            Packet {
-                packet_type: packet.packet_type,
-                data: decoder::PacketData::PlaintextData(packet.data),
-            },
-        ))
+        Ok((input, packet))
     } else {
         // packet length also contains the packet type, but we're sending the length of the data part.
         let (input, packet) = parse_binary_data_packet(input, Some((packet_length - 1) as usize))?;
-        // Binary data. Wrap the data in an enum and return it.
-        Ok((
-            input,
-            Packet {
-                packet_type: packet.packet_type,
-                data: decoder::PacketData::BinaryData(packet.data),
-            },
-        ))
+        Ok((input, packet))
     }
 }
 
@@ -274,28 +246,33 @@ fn parse_packet_data_type_in_binary_payload(input: &[u8]) -> IResult<&[u8], u8> 
     }
 }
 
-fn serialize_packet(packet_type: PacketType, data: &[u8]) -> Vec<u8> {
-    let packet_type_u8 = packet_type as u8;
-    let mut sequence = Vec::with_capacity(data.len() + 1);
-    sequence.push(packet_type_u8);
-    sequence.extend_from_slice(data);
-    sequence
-}
-
-fn serialize_payload<'a>(packets: &'a [Packet<encoder::PacketData>]) -> Vec<u8> {
-    packets.iter().fold(Vec::new(), |acc, packet| {
-        let serialized = serialize_packet_in_payload(packet.packet_type, &packet.data);
-        [acc, serialized].concat()
-    })
-}
-
-fn serialize_packet_in_payload<'a>(
-    packet_type: PacketType,
-    data: &'a encoder::PacketData,
-) -> Vec<u8> {
+fn serialize_packet<'a>(packet_type: PacketType, data: &'a PacketData) -> Vec<u8> {
     let packet_type_u8 = packet_type as u8;
     match data {
-        encoder::PacketData::PlaintextData(data) => {
+        PacketData::Plaintext(data) => {
+            // UTF-8 string to bytes conversion
+            let data = data.as_bytes();
+            // + 1 for the packet type
+            let mut sequence = Vec::with_capacity(data.len() + 1);
+            // plaintext packet type is encoded as an ASCII number
+            sequence.push(packet_type_u8 + b'0');
+            sequence.extend_from_slice(data);
+            sequence
+        }
+        PacketData::Binary(data) => {
+            let mut sequence = Vec::with_capacity(data.len() + 1);
+            sequence.push(packet_type_u8);
+            sequence.extend_from_slice(data);
+            sequence
+        }
+        PacketData::Empty => vec![packet_type_u8 + b'0'],
+    }
+}
+
+fn serialize_packet_in_payload<'a>(packet_type: PacketType, data: &'a PacketData) -> Vec<u8> {
+    let packet_type_u8 = packet_type as u8;
+    match data {
+        PacketData::Plaintext(data) => {
             // + 1 for the packet type
             let length_bytes = encode_packet_length(data.len() + 1);
             // UTF-8 string to bytes conversion
@@ -309,7 +286,7 @@ fn serialize_packet_in_payload<'a>(
             sequence.extend_from_slice(data);
             sequence
         }
-        encoder::PacketData::BinaryData(data) => {
+        PacketData::Binary(data) => {
             // + 1 for the packet type
             let length_bytes = encode_packet_length(data.len() + 1);
             let mut sequence = Vec::with_capacity(length_bytes.len() + data.len() + 3);
@@ -320,7 +297,15 @@ fn serialize_packet_in_payload<'a>(
             sequence.extend_from_slice(data);
             sequence
         }
+        PacketData::Empty => vec![1u8, b'0', 255u8, packet_type_u8 + b'0'],
     }
+}
+
+fn serialize_payload<'a>(packets: &'a [Packet]) -> Vec<u8> {
+    packets.iter().fold(Vec::new(), |acc, packet| {
+        let serialized = serialize_packet_in_payload(packet.packet_type, &packet.data);
+        [acc, serialized].concat()
+    })
 }
 
 #[cfg(test)]

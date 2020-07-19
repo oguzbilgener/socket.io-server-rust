@@ -21,7 +21,7 @@ include = [
 ]
 
 [dependencies]
-base64 = "0.12.2"
+base64 = "^0.12.2"
 nom = "^5.1.2"
 
 [dev-dependencies]

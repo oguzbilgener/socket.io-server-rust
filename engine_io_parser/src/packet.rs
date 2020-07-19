@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::error;
 use std::fmt;
@@ -53,10 +54,23 @@ impl PacketType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Packet<T> {
+/// Use this enum to figure out if a packet in a payload has binary or string data.
+/// In string-encoded payloads, each packet may contain string or binary data.
+/// Binary data in string-encoded payloads is encoded to base64. Otherwise, string
+/// data is returned as is.
+/// In binary-encoded payloads, each packet may contain string or binary data.
+/// If a packet in a payload has string data, it's parsed as a UTF-8 string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PacketData<'a> {
+    Plaintext(Cow<'a, str>),
+    Binary(Cow<'a, [u8]>),
+    Empty,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Packet<'a> {
     pub packet_type: PacketType,
-    pub data: T,
+    pub data: PacketData<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,5 +83,23 @@ impl error::Error for ParsePacketError {}
 impl fmt::Display for ParsePacketError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+
+impl<'a> From<&'a str> for PacketData<'a> {
+    fn from(val: &'a str) -> Self {
+        PacketData::Plaintext(Cow::Borrowed(val))
+    }
+}
+
+impl<'a> From<&'a [u8]> for PacketData<'a> {
+    fn from(val: &'a [u8]) -> Self {
+        PacketData::Binary(Cow::Borrowed(val))
+    }
+}
+
+impl<'a> From<Vec<u8>> for PacketData<'a> {
+    fn from(val: Vec<u8>) -> Self {
+        PacketData::Binary(Cow::Owned(val))
     }
 }
