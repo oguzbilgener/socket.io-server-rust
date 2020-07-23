@@ -3,7 +3,6 @@ use nom::{
     bytes::complete::take, bytes::complete::take_till1, character::complete::digit1,
     error::ErrorKind, multi::fold_many0, number::complete::le_u8, Err::Failure, IResult,
 };
-use std::borrow::Cow;
 
 pub mod decoder {
     use super::*;
@@ -150,7 +149,7 @@ fn parse_binary_data_packet(input: &[u8], data_length: Option<usize>) -> IResult
         input,
         Packet {
             packet_type,
-            data: PacketData::Binary(Cow::Borrowed(data)),
+            data: PacketData::from(data),
         },
     ))
 }
@@ -165,7 +164,7 @@ fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], 
             input,
             Packet {
                 packet_type,
-                data: PacketData::Plaintext(Cow::Borrowed(parsed_str)),
+                data: PacketData::from(data),
             },
         )),
         Err(_) => Err(nom::Err::Failure((

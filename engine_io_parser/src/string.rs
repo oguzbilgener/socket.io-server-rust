@@ -3,7 +3,6 @@ use nom::{
     branch::alt, bytes::complete::take, character::complete::char as nom_char,
     character::complete::digit1, multi::fold_many0, Err::Failure, IResult,
 };
-use std::borrow::Cow;
 
 pub mod decoder {
     use super::*;
@@ -168,7 +167,7 @@ fn parse_string_packet<'a>(input: &'a str, data_length: Option<usize>) -> IResul
         input,
         Packet {
             packet_type,
-            data: PacketData::Plaintext(Cow::Borrowed(data)),
+            data: PacketData::Plaintext(data.to_owned()),
         },
     ))
 }
@@ -218,7 +217,7 @@ fn parse_base64_string_packet(data_length: usize) -> impl Fn(&str) -> IResult<&s
                 input,
                 Packet {
                     packet_type,
-                    data: PacketData::Binary(Cow::Owned(vec)),
+                    data: PacketData::from(vec),
                 },
             )),
             Err(_) => Err(Failure((input, nom::error::ErrorKind::TakeWhile1))),

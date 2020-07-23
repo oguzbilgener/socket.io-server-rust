@@ -1,6 +1,6 @@
 [package]
-name = "engine_io_parser"
-description = "A parser for the engine.io protocol for Socket.IO"
+name = "engine_io_standalone"
+description = "stuff"
 version = "0.1.0"
 authors = ["Oguz Bilgener <oguz@bilgener.me>"]
 repository = "https://github.com/oguzbilgener/socket.io-server-rust"
@@ -21,19 +21,4 @@ include = [
 ]
 
 [dependencies]
-base64 = "^0.12.2"
-bytes = "^0.5.6"
-nom = "^5.1.2"
-
-[dev-dependencies]
-criterion = "0.3"
-
-[[test]]
-name = "binary_test"
-
-[[test]]
-name = "string_test"
-
-[[bench]]
-name = "encode_decode"
-harness = false
+engine_io = { path = "../engine_io" }

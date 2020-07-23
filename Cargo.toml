@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "engine_io_parser",
+    "engine_io",
+    "engine_io_standalone"
+]
