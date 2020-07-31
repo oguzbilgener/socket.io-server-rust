@@ -5,6 +5,7 @@ extern crate strum;
 extern crate uuid;
 #[macro_use]
 extern crate strum_macros;
+extern crate enum_dispatch;
 
 pub mod adapter;
 pub mod server;

@@ -5,4 +5,11 @@ pub trait Adapter<W: TransportImpl, P: TransportImpl>: Send + Sync {
     fn open_socket(&self);
     fn create_websocket_transport(&self, options: WebsocketTransportOptions) -> Transport<W, P>;
     fn create_polling_transport(&self, options: PollingTransportOptions) -> Transport<W, P>;
+
+    // verify (server)
+    // prepare (server)
+    // handleRequest (server)
+    // handleUpgrade (server)
+    // onWebSocket (server)
+    // attach (server)
 }

@@ -1,5 +1,5 @@
 use crate::adapter::Adapter;
-use crate::socket::{Socket, SocketEvent};
+use crate::socket::{subscribe_socket_to_transport_events, Socket, SocketEvent};
 use crate::transport::*;
 use engine_io_parser::packet::Packet;
 use futures::future::{AbortHandle, Abortable};
@@ -32,7 +32,7 @@ where
     P: 'static + TransportImpl,
 {
     adapter: &'static A,
-    clients: Arc<RwLock<HashMap<String, Socket<A, W, P>>>>,
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Socket<A, W, P>>>>>>,
     // ping timeout handler EngineIoSocketTimeoutHandler
     pub options: ServerOptions,
     /// Event sender to Socket instances
@@ -143,18 +143,32 @@ where
             }
         };
 
-        let socket: Socket<A, W, P> = Socket::new(
+        let socket: Arc<Mutex<Socket<A, W, P>>> = Arc::new(Mutex::new(Socket::new(
             id.clone(),
             transport,
             remote_address.to_owned(),
             self.adapter,
-            self.options.initial_packet.clone(),
             self.socket_event_sender.clone(),
-        );
+        )));
+
+        {
+            self.clients
+                .write()
+                .await
+                .insert(id.clone(), socket.clone());
+
+            let mut socket = socket.lock().await;
+
+            socket.open().await;
+
+            if let Some(initial_message_packet) = self.options.initial_packet.clone() {
+                socket.send_packet(initial_message_packet, None).await;
+            }
+        }
+
+        subscribe_socket_to_transport_events(socket).await;
 
         // TODO: headers['Set-Cookie'] from the original implementation
-
-        self.clients.write().await.insert(id.clone(), socket);
 
         // Emit a "connection" event. This is an internal event that's used by socket_io
         let _ = self
