@@ -25,14 +25,9 @@ pub struct ServerOptions {
     // -- cors
 }
 
-pub struct Server<A, W, P>
-where
-    A: 'static + Adapter<W, P>,
-    W: 'static + TransportImpl,
-    P: 'static + TransportImpl,
-{
+pub struct Server<A: 'static + Adapter> {
     adapter: &'static A,
-    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Socket<A, W, P>>>>>>,
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Socket<A>>>>>>,
     // ping timeout handler EngineIoSocketTimeoutHandler
     pub options: ServerOptions,
     /// Event sender to Socket instances
@@ -79,12 +74,7 @@ pub enum ServerEvent {
     },
 }
 
-impl<A, W, P> Server<A, W, P>
-where
-    A: 'static + Adapter<W, P>,
-    W: TransportImpl,
-    P: TransportImpl,
-{
+impl<A: 'static + Adapter> Server<A> {
     pub fn new(adapter: &'static A, options: ServerOptions) -> (Self, Receiver<ServerEvent>) {
         // To listen events from socket instances
         let (socket_listen_tx, socket_listen_rx) = channel(1024);
@@ -125,25 +115,27 @@ where
     ) {
         let id = self.generate_id();
 
-        let transport: Transport<W, P> = match transport_kind {
-            TransportKind::Websocket => {
+        let transport: Transport<A> = match transport_kind {
+            TransportKind::Websocket => Transport::Websocket(
                 self.adapter
                     .create_websocket_transport(WebsocketTransportOptions {
                         per_message_deflate: true,
-                    })
-            }
+                    }),
+            ),
             TransportKind::Polling => {
-                self.adapter
-                    .create_polling_transport(PollingTransportOptions {
-                        // FIXME: get these options from somewhere
-                        max_http_buffer_size: 1024,
-                        http_compression: None,
-                        supports_binary,
-                    })
+                Transport::Polling(
+                    self.adapter
+                        .create_polling_transport(PollingTransportOptions {
+                            // FIXME: get these options from somewhere
+                            max_http_buffer_size: 1024,
+                            http_compression: None,
+                            supports_binary,
+                        }),
+                )
             }
         };
 
-        let socket: Arc<Mutex<Socket<A, W, P>>> = Arc::new(Mutex::new(Socket::new(
+        let socket: Arc<Mutex<Socket<A>>> = Arc::new(Mutex::new(Socket::new(
             id.clone(),
             transport,
             remote_address.to_owned(),

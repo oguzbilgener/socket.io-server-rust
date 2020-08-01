@@ -5,12 +5,13 @@ extern crate strum;
 extern crate uuid;
 #[macro_use]
 extern crate strum_macros;
-extern crate enum_dispatch;
 
 pub mod adapter;
 pub mod server;
 pub mod socket;
 pub mod transport;
+
+pub use engine_io_parser::packet;
 
 #[cfg(test)]
 mod tests {

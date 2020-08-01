@@ -1,10 +1,13 @@
 use crate::transport::*;
 
-pub trait Adapter<W: TransportImpl, P: TransportImpl>: Send + Sync {
+pub trait Adapter: Send + Sync {
+    type Websocket: TransportImpl;
+    type Polling: TransportImpl;
+
     fn close(&self);
     fn open_socket(&self);
-    fn create_websocket_transport(&self, options: WebsocketTransportOptions) -> Transport<W, P>;
-    fn create_polling_transport(&self, options: PollingTransportOptions) -> Transport<W, P>;
+    fn create_websocket_transport(&self, options: WebsocketTransportOptions) -> Self::Websocket;
+    fn create_polling_transport(&self, options: PollingTransportOptions) -> Self::Polling;
 
     // verify (server)
     // prepare (server)

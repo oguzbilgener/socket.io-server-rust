@@ -21,51 +21,37 @@ pub enum SocketEvent {
     Message { socket_id: String, data: PacketData },
 }
 
-pub struct Socket<A, W, P>
-where
-    A: 'static + Adapter<W, P>,
-    W: 'static + TransportImpl,
-    P: 'static + TransportImpl,
-{
+pub struct Socket<A: 'static + Adapter> {
     pub id: String,
     upgrade_state: UpgradeState,
     ready_state: ReadyState,
     remote_address: String,
-
     adapter: &'static A,
     write_buffer: Vec<Packet>,
     event_sender: Sender<SocketEvent>,
-    transport: Transport<W, P>,
-    transport_event_receiver: Arc<Mutex<Receiver<TransportEvent>>>,
-    // transport_holder: TransportHolder<W, P>,
+    transport_holder: TransportHolder<A>,
     /// This is the `packetsFn` from the original engine.io JS implementation
     pending_callbacks: Vec<Callback>,
     // This is the `sentCallbackFn` from the original engine.io JS implementation
     flushed_callbacks: Vec<CallbackBatch>,
 }
 
-struct TransportHolder<W, P>
-where
-    W: 'static + TransportImpl,
-    P: 'static + TransportImpl,
-{
-    transport: Transport<W, P>,
+struct TransportHolder<A: 'static + Adapter> {
+    transport: Transport<A>,
     transport_event_receiver: Arc<Mutex<Receiver<TransportEvent>>>,
 }
 
-// impl<W, P> TransportHolder<W, P>
-// where
-//     W: 'static + TransportImpl,
-//     P: 'static + TransportImpl, {
-//     pub(crate) fn make_transport_holder(&mut self) {
-//         // let (transport_event_tx, transport_event_rx) = channel(128);
-//         let transport: &mut dyn TransportImpl = match self.transport {
-//             Transport::Websocket(mut transport) => &mut transport,
-//             Transport::Polling(mut transport) => &mut transport,
-//         };
-//     }
-// }
-
+impl<A: 'static + Adapter> TransportHolder<A> {
+    pub(crate) fn new(transport: Transport<A>) -> Self {
+        let (transport_event_tx, transport_event_rx) = channel(128);
+        let mut holder = TransportHolder {
+            transport,
+            transport_event_receiver: Arc::new(Mutex::new(transport_event_rx)),
+        };
+        holder.transport.set_event_sender(transport_event_tx);
+        holder
+    }
+}
 
 enum CallbackBatch {
     NonFramed { callbacks: Vec<Callback> },
@@ -77,68 +63,41 @@ pub enum SocketError {
     ParseError,
 }
 
-macro_rules! get_transport {
-    ($ref:expr) => {{
-        let transport: Box<&mut dyn TransportImpl> = match &mut $ref.transport {
-            Transport::Websocket(transport) => Box::new(transport),
-            Transport::Polling(transport) => Box::new(transport),
-        };
-        transport
-    }};
-}
-
-impl<A, W, P> Socket<A, W, P>
-where
-    A: 'static + Adapter<W, P>,
-    W: 'static + TransportImpl,
-    P: 'static + TransportImpl,
-{
+impl<A: 'static + Adapter> Socket<A> {
     pub fn new(
         id: String,
-        transport: Transport<W, P>,
+        transport: Transport<A>,
         remote_address: String,
         adapter: &'static A,
         event_sender: Sender<SocketEvent>,
     ) -> Self {
-        let mut socket = Socket {
+        Socket {
             id,
             remote_address,
             upgrade_state: UpgradeState::Initial,
             ready_state: ReadyState::Opening,
-            transport,
+            transport_holder: TransportHolder::new(transport),
             adapter,
             write_buffer: Vec::new(),
             event_sender,
             // TODO: avoid the channel initiation here.
-            transport_event_receiver: Arc::new(Mutex::new(channel(0).1)),
             pending_callbacks: Vec::new(),
             flushed_callbacks: Vec::new(),
-        };
-        socket.setup_transport();
-        socket
+        }
     }
 
-    fn setup_transport(&mut self) {
-        let transport = get_transport!(self);
-        let (transport_event_tx, transport_event_rx) = channel(128);
-        self.transport_event_receiver = Arc::new(Mutex::new(transport_event_rx));
-        transport.set_event_sender(transport_event_tx);
+    fn set_transport(&mut self, transport: Transport<A>) {
+        self.transport_holder = TransportHolder::new(transport);
     }
 
-    fn set_transport(&mut self, transport: Transport<W, P>) {
-        self.transport = transport;
-        self.setup_transport();
-    }
-
-    fn close_transport(&mut self) {
-        get_transport!(self).close();
+    async fn close_transport(&mut self) {
+        self.transport_holder.transport.close().await
         // TODO: do a few other things
     }
 
     pub async fn open(&mut self) {
         self.ready_state = ReadyState::Open;
-        let transport = get_transport!(self);
-        transport.set_sid(self.id.clone());
+        self.transport_holder.transport.set_sid(self.id.clone());
 
         // Send the open packet as json string
         self.send_open_packet().await;
@@ -190,13 +149,13 @@ where
         .await;
     }
 
-    pub fn maybe_upgrade(&'static mut self, transport: W) {
+    pub fn maybe_upgrade(&'static mut self, transport: A::Websocket) {
         // TODO: lots of things here
         self.set_transport(Transport::Websocket(transport));
     }
 
     async fn flush(&mut self) {
-        let transport = get_transport!(self);
+        let transport = &self.transport_holder.transport;
         if self.ready_state != ReadyState::Closed
             && transport.is_writable()
             && self.write_buffer.len() > 0
@@ -367,15 +326,12 @@ where
     }
 }
 
-pub async fn subscribe_socket_to_transport_events<A, W, P>(socket: Arc<Mutex<Socket<A, W, P>>>)
-where
-    A: 'static + Adapter<W, P>,
-    W: 'static + TransportImpl,
-    P: 'static + TransportImpl,
-{
+pub async fn subscribe_socket_to_transport_events<A: 'static + Adapter>(
+    socket: Arc<Mutex<Socket<A>>>,
+) {
     let receiver = {
         let socket = socket.lock().await;
-        socket.transport_event_receiver.clone()
+        socket.transport_holder.transport_event_receiver.clone()
     };
     let subscriber_task = async move {
         let mut receiver = receiver.lock().await;

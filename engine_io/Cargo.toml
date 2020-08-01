@@ -13,7 +13,6 @@ futures = { version = "^0.3" }
 # FIXME: figure out the necessary features to enable only
 tokio = { version = "^0.2", features = ["full"] }
 async-trait = "^0.1.36"
-enum_dispatch = "0.3.1"
 uuid = { version = "0.8", features = ["v4"] }
 serde_json = "^1.0.55"
 # FIXME: determine if it's worth to keep strum
