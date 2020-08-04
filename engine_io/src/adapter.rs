@@ -1,12 +1,19 @@
 use crate::transport::*;
+use async_trait::async_trait;
 
+#[async_trait]
 pub trait Adapter: Send + Sync {
-    type Websocket: TransportImpl;
+    type WebSocket: TransportImpl;
     type Polling: TransportImpl;
 
-    fn close(&self);
+    async fn listen(&self);
+
+    async fn close(&self);
     fn open_socket(&self);
-    fn create_websocket_transport(&self, options: WebsocketTransportOptions) -> Self::Websocket;
+
+    fn set_cookie(&self);
+
+    fn create_websocket_transport(&self, options: WebsocketTransportOptions) -> Self::WebSocket;
     fn create_polling_transport(&self, options: PollingTransportOptions) -> Self::Polling;
 
     // verify (server)

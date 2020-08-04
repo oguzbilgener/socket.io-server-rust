@@ -1,4 +1,5 @@
 use crate::adapter::Adapter;
+use crate::server::ServerOptions;
 use crate::transport::*;
 use engine_io_parser::packet::*;
 use serde_json::json;
@@ -26,7 +27,6 @@ pub struct Socket<A: 'static + Adapter> {
     upgrade_state: UpgradeState,
     ready_state: ReadyState,
     remote_address: String,
-    adapter: &'static A,
     write_buffer: Vec<Packet>,
     event_sender: Sender<SocketEvent>,
     transport_holder: TransportHolder<A>,
@@ -68,7 +68,6 @@ impl<A: 'static + Adapter> Socket<A> {
         id: String,
         transport: Transport<A>,
         remote_address: String,
-        adapter: &'static A,
         event_sender: Sender<SocketEvent>,
     ) -> Self {
         Socket {
@@ -77,7 +76,6 @@ impl<A: 'static + Adapter> Socket<A> {
             upgrade_state: UpgradeState::Initial,
             ready_state: ReadyState::Opening,
             transport_holder: TransportHolder::new(transport),
-            adapter,
             write_buffer: Vec::new(),
             event_sender,
             // TODO: avoid the channel initiation here.
@@ -90,17 +88,12 @@ impl<A: 'static + Adapter> Socket<A> {
         self.transport_holder = TransportHolder::new(transport);
     }
 
-    async fn close_transport(&mut self) {
-        self.transport_holder.transport.close().await
-        // TODO: do a few other things
-    }
-
-    pub async fn open(&mut self) {
+    pub async fn open(&mut self, server_options: &ServerOptions) {
         self.ready_state = ReadyState::Open;
         self.transport_holder.transport.set_sid(self.id.clone());
 
         // Send the open packet as json string
-        self.send_open_packet().await;
+        self.send_open_packet(server_options).await;
 
         self.event_sender
             .send(SocketEvent::Open {
@@ -110,8 +103,25 @@ impl<A: 'static + Adapter> Socket<A> {
         self.set_ping_timeout();
     }
 
+    pub async fn close(&mut self, discard: bool) {
+        if self.ready_state == ReadyState::Open {
+            self.ready_state = ReadyState::Closing {
+                with_discard: discard,
+            };
+
+            if self.write_buffer.is_empty() {
+                self.transport_holder.transport.close().await;
+            }
+            // If the write buffer is not empty, the original engine.io
+            // JS implementation waits for the drain event to occur
+            // (in the `flush` method) to close the transport.
+            // In this implementation `flush` takes care of this for us,
+            // when the `readyState` is `Closing`
+        }
+    }
+
     pub(crate) async fn send_packet(&mut self, packet: Packet, callback: Option<Callback>) {
-        if self.ready_state != ReadyState::Closing && self.ready_state != ReadyState::Closed {
+        if self.ready_state == ReadyState::Opening || self.ready_state == ReadyState::Open {
             // TODO: The original JS implementation here adds a `compress` option.
 
             self.write_buffer.push(packet.clone());
@@ -149,9 +159,19 @@ impl<A: 'static + Adapter> Socket<A> {
         .await;
     }
 
-    pub fn maybe_upgrade(&'static mut self, transport: A::Websocket) {
+    pub fn maybe_upgrade(&mut self, transport: A::WebSocket) {
         // TODO: lots of things here
-        self.set_transport(Transport::Websocket(transport));
+        self.set_transport(Transport::WebSocket(transport));
+    }
+
+    // One method that's missing here is `clearTransport` which you can find in
+    // the original engine.io JS implementation. We don't really need it.
+
+    async fn close_transport(&mut self, discard: bool) {
+        if discard {
+            self.transport_holder.transport.discard();
+        }
+        self.transport_holder.transport.close().await;
     }
 
     async fn flush(&mut self) {
@@ -193,6 +213,16 @@ impl<A: 'static + Adapter> Socket<A> {
                     socket_id: id.clone(),
                 })
                 .await;
+
+            if let ReadyState::Closing { with_discard } = self.ready_state {
+                // Just flushed the write buffer, now we can actually close
+                // the transport.
+                if with_discard {
+                    transport.discard();
+                } else {
+                    transport.close().await;
+                }
+            }
         }
     }
 
@@ -201,15 +231,16 @@ impl<A: 'static + Adapter> Socket<A> {
     }
 
     fn set_ping_timeout(&self) {
+        // TODO: set a timer
         unimplemented!();
     }
 
-    async fn send_open_packet(&mut self) {
+    async fn send_open_packet(&mut self, server_options: &ServerOptions) {
         let open_packet_data = json!({
             "sid": self.id,
             "upgrades": self.get_available_upgrades(),
-            "ping_interval": 0,// self.server_options.ping_interval,
-            "ping_timeout": 0, //self.server_options.ping_timeout
+            "ping_interval": server_options.ping_interval,
+            "ping_timeout": server_options.ping_timeout
         });
         let open_packet = Packet {
             packet_type: PacketType::Open,
@@ -228,7 +259,7 @@ impl<A: 'static + Adapter> Socket<A> {
             // FIXME: clear upgrade timeout timer
             self.write_buffer.clear();
             self.pending_callbacks.clear();
-            self.close_transport();
+            self.close_transport(false).await;
 
             // Send a "close" event to server
             let _ = self
@@ -241,12 +272,15 @@ impl<A: 'static + Adapter> Socket<A> {
     }
 
     async fn on_transport_error(&mut self, error: TransportError) {
-        match error {
-            // Used instead of the `error` type, undocumented pseudo packet in the JS implementation
-            TransportError::PacketParseError => {
-                self.on_close(SocketError::ParseError, "FIXME").await
+        if self.ready_state == ReadyState::Opening || self.ready_state == ReadyState::Open {
+            match error {
+                // Used instead of the `error` type, undocumented pseudo packet in
+                // the JS implementation
+                TransportError::PacketParseError => {
+                    self.on_close(SocketError::ParseError, "FIXME").await
+                }
+                _ => self.on_close(SocketError::TransportError, "FIXME").await,
             }
-            _ => self.on_close(SocketError::TransportError, "FIXME").await,
         }
     }
 
@@ -273,7 +307,7 @@ impl<A: 'static + Adapter> Socket<A> {
                     if self.ready_state != ReadyState::Closed
                         && self.upgrade_state == UpgradeState::Upgrading
                     {
-                        self.close_transport();
+                        self.close_transport(false).await;
                         // Emit an upgrade event
                         let _ = self
                             .event_sender
@@ -377,6 +411,6 @@ pub enum UpgradeState {
 pub enum ReadyState {
     Opening,
     Open,
-    Closing,
+    Closing { with_discard: bool },
     Closed,
 }

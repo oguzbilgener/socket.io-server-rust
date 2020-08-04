@@ -29,7 +29,7 @@ fn benchmark(c: &mut Criterion) {
         b.iter(|| {
             binary_encoder::encode_packet(&Packet {
                 packet_type: PacketType::Message,
-                data: PacketData::Binary(Cow::Owned(vec![1, 2, 3, 4])),
+                data: PacketData::Binary(vec![1, 2, 3, 4]),
             })
         })
     });

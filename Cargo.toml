@@ -3,5 +3,6 @@
 members = [
     "engine_io_parser",
     "engine_io",
-    "engine_io_standalone"
+    "engine_io_standalone",
+    "examples/engine_io_standalone_server"
 ]

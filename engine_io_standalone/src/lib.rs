@@ -1,18 +1,12 @@
 #![forbid(unsafe_code)]
 extern crate engine_io;
 
+pub mod standalone;
+pub mod polling;
+pub mod websocket;
+
 use engine_io::transport::*;
 
-pub struct WebsocketTransport {}
-
-impl TransportImpl for WebsocketTransport {
-
-}
-
-
-struct StandaloneAdapter {
-
-}
 
 #[cfg(test)]
 mod tests {

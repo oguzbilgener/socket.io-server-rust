@@ -1,10 +1,10 @@
 use crate::adapter::Adapter;
 use crate::socket::{subscribe_socket_to_transport_events, Socket, SocketEvent};
 use crate::transport::*;
-use engine_io_parser::packet::Packet;
+use engine_io_parser::packet::{Packet, PacketData};
 use futures::future::{AbortHandle, Abortable};
-use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
@@ -26,7 +26,8 @@ pub struct ServerOptions {
 }
 
 pub struct Server<A: 'static + Adapter> {
-    adapter: &'static A,
+    adapter: A,
+    // TODO: consider using something like https://github.com/jonhoo/flurry
     clients: Arc<RwLock<HashMap<String, Arc<Mutex<Socket<A>>>>>>,
     // ping timeout handler EngineIoSocketTimeoutHandler
     pub options: ServerOptions,
@@ -44,7 +45,7 @@ impl Default for ServerOptions {
             ping_timeout: 5000,
             ping_interval: 25000,
             upgrade_timeout: 10000,
-            transports: vec![TransportKind::Websocket, TransportKind::Polling],
+            transports: vec![TransportKind::WebSocket, TransportKind::Polling],
             allow_upgrades: true,
             initial_packet: None,
         }
@@ -72,10 +73,14 @@ pub enum ServerEvent {
     Drain {
         connection_id: String,
     },
+    Message {
+        connection_id: String,
+        data: PacketData,
+    },
 }
 
 impl<A: 'static + Adapter> Server<A> {
-    pub fn new(adapter: &'static A, options: ServerOptions) -> (Self, Receiver<ServerEvent>) {
+    pub fn new(adapter: A, options: ServerOptions) -> (Self, Receiver<ServerEvent>) {
         // To listen events from socket instances
         let (socket_listen_tx, socket_listen_rx) = channel(1024);
         // To send events to the owner of this Server instance
@@ -92,6 +97,24 @@ impl<A: 'static + Adapter> Server<A> {
         // server or attaches to a server.
         server.subscribe_to_socket_events();
         (server, server_send_rx)
+    }
+
+    pub async fn listen(&self) -> Result<(), Box<dyn Error>> {
+        // TODO: handle shutdown properly by receiving a shutdown signal
+        // sending it to socket instances.
+        println!("listen!");
+        Ok(())
+    }
+
+    pub async fn close(&self) {
+        {
+            let mut clients = self.clients.write().await;
+            for (_id, socket) in clients.iter_mut() {
+                // TODO: make this more concurrent?
+                socket.lock().await.close(true).await;
+            }
+        }
+        self.adapter.close().await;
     }
 
     pub fn handle_request(&self) -> Result<usize, String> {
@@ -116,7 +139,7 @@ impl<A: 'static + Adapter> Server<A> {
         let id = self.generate_id();
 
         let transport: Transport<A> = match transport_kind {
-            TransportKind::Websocket => Transport::Websocket(
+            TransportKind::WebSocket => Transport::WebSocket(
                 self.adapter
                     .create_websocket_transport(WebsocketTransportOptions {
                         per_message_deflate: true,
@@ -139,7 +162,6 @@ impl<A: 'static + Adapter> Server<A> {
             id.clone(),
             transport,
             remote_address.to_owned(),
-            self.adapter,
             self.socket_event_sender.clone(),
         )));
 
@@ -151,7 +173,7 @@ impl<A: 'static + Adapter> Server<A> {
 
             let mut socket = socket.lock().await;
 
-            socket.open().await;
+            socket.open(&self.options).await;
 
             if let Some(initial_message_packet) = self.options.initial_packet.clone() {
                 socket.send_packet(initial_message_packet, None).await;
@@ -160,7 +182,7 @@ impl<A: 'static + Adapter> Server<A> {
 
         subscribe_socket_to_transport_events(socket).await;
 
-        // TODO: headers['Set-Cookie'] from the original implementation
+        self.adapter.set_cookie();
 
         // Emit a "connection" event. This is an internal event that's used by socket_io
         let _ = self
@@ -215,6 +237,17 @@ impl<A: 'static + Adapter> Server<A> {
                                 .await
                                 .send(ServerEvent::Drain {
                                     connection_id: socket_id,
+                                })
+                                .await;
+                        }
+                        SocketEvent::Message { socket_id, data } => {
+                            // Forward the Drain event to the external listener
+                            external_event_sender
+                                .lock()
+                                .await
+                                .send(ServerEvent::Message {
+                                    connection_id: socket_id,
+                                    data: data,
                                 })
                                 .await;
                         }

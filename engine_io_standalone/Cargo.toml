@@ -22,3 +22,8 @@ include = [
 
 [dependencies]
 engine_io = { path = "../engine_io" }
+async-trait = "^0.1.36"
+# FIXME: figure out the necessary features to enable only
+tokio = { version = "^0.2", features = ["full"] }
+tokio-tungstenite = "^0.10.1"
+hyper = "^0.13.7"
