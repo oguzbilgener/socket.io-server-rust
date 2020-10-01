@@ -2,7 +2,10 @@
 
 members = [
     "engine_io_parser",
-    "engine_io",
+    "engine_io_server",
+    "engine_io_warp",
     "engine_io_standalone",
+    "socket_io_server",
+    "socket_io_parser",
     "examples/engine_io_standalone_server"
 ]

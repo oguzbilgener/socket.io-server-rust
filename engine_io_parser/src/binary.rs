@@ -160,7 +160,7 @@ fn parse_string_data_packet(input: &[u8], data_length: usize) -> IResult<&[u8], 
     let (input, data) = take(data_length)(input)?;
     let packet_type = PacketType::parse_from_u8(packet_type_ascii[0] - b'0', input)?;
     match std::str::from_utf8(data) {
-        Ok(parsed_str) => Ok((
+        Ok(_) => Ok((
             input,
             Packet {
                 packet_type,
@@ -248,7 +248,7 @@ fn parse_packet_data_type_in_binary_payload(input: &[u8]) -> IResult<&[u8], u8> 
 fn serialize_packet<'a>(packet_type: PacketType, data: &'a PacketData) -> Vec<u8> {
     let packet_type_u8 = packet_type as u8;
     match data {
-        PacketData::Plaintext(data) => {
+        PacketData::Text(data) => {
             // UTF-8 string to bytes conversion
             let data = data.as_bytes();
             // + 1 for the packet type
@@ -271,7 +271,7 @@ fn serialize_packet<'a>(packet_type: PacketType, data: &'a PacketData) -> Vec<u8
 fn serialize_packet_in_payload<'a>(packet_type: PacketType, data: &'a PacketData) -> Vec<u8> {
     let packet_type_u8 = packet_type as u8;
     match data {
-        PacketData::Plaintext(data) => {
+        PacketData::Text(data) => {
             // + 1 for the packet type
             let length_bytes = encode_packet_length(data.len() + 1);
             // UTF-8 string to bytes conversion

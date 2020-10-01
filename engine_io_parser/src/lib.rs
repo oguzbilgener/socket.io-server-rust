@@ -7,3 +7,4 @@ pub const PROTOCOL: u8 = 3;
 pub mod binary;
 pub mod packet;
 pub mod string;
+pub mod decoder;

@@ -62,7 +62,7 @@ impl PacketType {
 /// If a packet in a payload has string data, it's parsed as a UTF-8 string.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PacketData {
-    Plaintext(String),
+    Text(String),
     Binary(Bytes),
     Empty,
 }
@@ -88,13 +88,13 @@ impl fmt::Display for ParsePacketError {
 
 impl From<&str> for PacketData {
     fn from(val: &str) -> Self {
-        PacketData::Plaintext(val.to_owned())
+        PacketData::Text(val.to_owned())
     }
 }
 
 impl From<String> for PacketData {
     fn from(val: String) -> Self {
-        PacketData::Plaintext(val)
+        PacketData::Text(val)
     }
 }
 

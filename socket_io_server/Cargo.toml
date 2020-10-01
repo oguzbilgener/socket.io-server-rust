@@ -1,6 +1,6 @@
 [package]
-name = "engine_io_standalone"
-description = "stuff"
+name = "socket_io_server"
+description = "A web framework-agnostic implementation of Socket.IO in Rust"
 version = "0.1.0"
 authors = ["Oguz Bilgener <oguz@bilgener.me>"]
 repository = "https://github.com/oguzbilgener/socket.io-server-rust"
@@ -21,14 +21,14 @@ include = [
 ]
 
 [dependencies]
-engine_io_warp = { path = "../engine_io_warp" }
+
+engine_io_server = { path = "../engine_io_server" }
+socket_io_parser = { path = "../socket_io_parser" }
+# engine_io_server = { version = "^0.1.0" }
 futures = { version = "^0.3" }
 async-trait = "^0.1.40"
 # FIXME: figure out the necessary features to enable only
 tokio = { version = "^0.2", features = ["full"] }
 warp = { version = "^0.2", features = ["websocket"] }
-
-[dev-dependencies]
-hyper = "^0.13"
-tungstenite = "0.11.1"
-tokio-tungstenite = "0.11.0"
+regex = "^1.4.2"
+serde_json = "^1.0.55"

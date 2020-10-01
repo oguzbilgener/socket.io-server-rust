@@ -1,10 +1,10 @@
 [package]
-name = "engine_io_standalone"
-description = "stuff"
+name = "engine_io_warp"
+description = "The Warp framework adapter for engine_io_server"
 version = "0.1.0"
 authors = ["Oguz Bilgener <oguz@bilgener.me>"]
 repository = "https://github.com/oguzbilgener/socket.io-server-rust"
-keywords = ["socketio", "engineio", "websocket"]
+keywords = ["socketio", "engineio", "websocket", "warp", "hyper"]
 license = "MIT"
 edition = "2018"
 
@@ -21,14 +21,14 @@ include = [
 ]
 
 [dependencies]
-engine_io_warp = { path = "../engine_io_warp" }
+# engine_io_server = { version = "^0.1.0" }
+# engine_io_parser = { version = "^0.2.0" }
+engine_io_server = { path = "../engine_io_server" }
+engine_io_parser = { path = "../engine_io_parser" }
 futures = { version = "^0.3" }
 async-trait = "^0.1.40"
+bytes = "^0.5.6"
 # FIXME: figure out the necessary features to enable only
 tokio = { version = "^0.2", features = ["full"] }
 warp = { version = "^0.2", features = ["websocket"] }
-
-[dev-dependencies]
-hyper = "^0.13"
-tungstenite = "0.11.1"
-tokio-tungstenite = "0.11.0"
+serde = { version = "^1.0.116", features = ["derive"] }

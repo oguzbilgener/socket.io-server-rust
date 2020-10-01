@@ -10,6 +10,7 @@ pub mod adapter;
 pub mod server;
 pub mod socket;
 pub mod transport;
+pub mod util;
 
 pub use engine_io_parser::packet;
 

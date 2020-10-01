@@ -167,7 +167,7 @@ fn parse_string_packet<'a>(input: &'a str, data_length: Option<usize>) -> IResul
         input,
         Packet {
             packet_type,
-            data: PacketData::Plaintext(data.to_owned()),
+            data: PacketData::Text(data.to_owned()),
         },
     ))
 }
@@ -228,7 +228,7 @@ fn parse_base64_string_packet(data_length: usize) -> impl Fn(&str) -> IResult<&s
 fn serialize_packet(packet: &Packet) -> String {
     let packet_type_int = packet.packet_type as u8;
     let data: String = match &packet.data {
-        PacketData::Plaintext(data) => data.to_string(),
+        PacketData::Text(data) => data.to_string(),
         PacketData::Binary(data) => base64::encode(data),
         PacketData::Empty => String::from(""),
     };
@@ -244,7 +244,7 @@ fn serialize_payload(packets: &[Packet]) -> String {
                     // Adding + 1 to the length because of the `b` character indicating base64-encoded data.
                     (serialized.chars().count() + 1).to_string() + ":b" + &serialized
                 }
-                PacketData::Plaintext(_) => {
+                PacketData::Text(_) => {
                     serialized.chars().count().to_string() + ":" + &serialized
                 }
                 PacketData::Empty => String::from(""),

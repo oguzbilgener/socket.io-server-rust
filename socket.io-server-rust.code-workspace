@@ -4,26 +4,43 @@
 			"path": "engine_io_parser"
 		},
 		{
-			"path": "engine_io"
+			"path": "engine_io_server"
 		},
 		{
 			"path": "engine_io_standalone"
 		},
 		{
-			"path": "socket_io"
+			"path": "socket_io_server"
 		},
 		{
 			"path": "examples/engine_io_standalone_server"
-		}
-	],
-	"files": [
-		"Cargo.toml"
+		},
+		{
+			"path": "engine_io_warp"
+		},
+        {
+            "path":  "socket_io_parser"
+        }
 	],
 	"settings": {
+		"files.include": [
+                    "Cargo.toml"
+                ],
+                "files.exclude": {
+                    "**/target": true,
+                },
 		"workbench.preferredDarkColorTheme": "Gentle Monokai",
 		"workbench.colorTheme": "Gentle Monokai",
 		"editor.formatOnSave": true,
 		"editor.defaultFormatter": "rust-lang.rust",
-		"rust.all_features": true
+		"rust.all_features": true,
+		"editor.formatOnSaveMode": "modifications",
+		"rust.clippy_preference": "on",
+		"rust-client.engine": "rust-analyzer",
+		"rust.rust-analyzer.releaseTag": "2020-10-05",
+		"[rust]": {
+			"editor.defaultFormatter": "matklad.rust-analyzer"
+		},
+		"todo-tree.tree.showCountsInTree": true,
 	}
 }

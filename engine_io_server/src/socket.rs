@@ -1,12 +1,17 @@
 use crate::adapter::Adapter;
+use crate::packet::{Packet, PacketData, PacketType};
 use crate::server::ServerOptions;
-use crate::transport::*;
-use engine_io_parser::packet::*;
+use crate::transport::{
+    PollingTransport, PollingTransportOptions, RequestReply, Transport, TransportBase,
+    TransportCreateData, TransportError, TransportEvent, TransportKind, WebsocketTransport,
+    WebsocketTransportOptions,
+};
+use crate::util::{RequestContext, ServerError};
 use serde_json::json;
 use std::mem;
 use std::sync::Arc;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{broadcast, mpsc};
 
 /// This callback type is mainly used for `ack`s for packets sent by the server.
 type Callback = Box<dyn Fn() + Send + 'static>;
@@ -20,6 +25,7 @@ pub enum SocketEvent {
     Upgrade { socket_id: String },
     Heartbeat { socket_id: String },
     Message { socket_id: String, data: PacketData },
+    Error { socket_id: String },
 }
 
 pub struct Socket<A: 'static + Adapter> {
@@ -28,7 +34,7 @@ pub struct Socket<A: 'static + Adapter> {
     ready_state: ReadyState,
     remote_address: String,
     write_buffer: Vec<Packet>,
-    event_sender: Sender<SocketEvent>,
+    event_sender: mpsc::Sender<SocketEvent>,
     transport_holder: TransportHolder<A>,
     /// This is the `packetsFn` from the original engine.io JS implementation
     pending_callbacks: Vec<Callback>,
@@ -38,17 +44,22 @@ pub struct Socket<A: 'static + Adapter> {
 
 struct TransportHolder<A: 'static + Adapter> {
     transport: Transport<A>,
-    transport_event_receiver: Arc<Mutex<Receiver<TransportEvent>>>,
+    transport_event_sender: broadcast::Sender<TransportEvent>,
+    // TODO: get rid of this?
+    transport_event_receiver: Arc<AsyncMutex<broadcast::Receiver<TransportEvent>>>,
 }
 
 impl<A: 'static + Adapter> TransportHolder<A> {
-    pub(crate) fn new(transport: Transport<A>) -> Self {
-        let (transport_event_tx, transport_event_rx) = channel(128);
-        let mut holder = TransportHolder {
+    pub(crate) fn new(
+        transport: Transport<A>,
+        transport_event_sender: broadcast::Sender<TransportEvent>,
+        transport_event_receiver: broadcast::Receiver<TransportEvent>,
+    ) -> Self {
+        let holder = TransportHolder {
             transport,
-            transport_event_receiver: Arc::new(Mutex::new(transport_event_rx)),
+            transport_event_receiver: Arc::new(AsyncMutex::new(transport_event_receiver)),
+            transport_event_sender,
         };
-        holder.transport.set_event_sender(transport_event_tx);
         holder
     }
 }
@@ -66,16 +77,23 @@ pub enum SocketError {
 impl<A: 'static + Adapter> Socket<A> {
     pub fn new(
         id: String,
-        transport: Transport<A>,
         remote_address: String,
-        event_sender: Sender<SocketEvent>,
+        event_sender: mpsc::Sender<SocketEvent>,
+        transport_create_data: TransportCreateData<A::WsHandle>,
     ) -> Self {
+        let (transport, transport_event_sender, transport_event_receiver) =
+            Self::create_transport(transport_create_data);
+
         Socket {
             id,
             remote_address,
             upgrade_state: UpgradeState::Initial,
             ready_state: ReadyState::Opening,
-            transport_holder: TransportHolder::new(transport),
+            transport_holder: TransportHolder::new(
+                transport,
+                transport_event_sender,
+                transport_event_receiver,
+            ),
             write_buffer: Vec::new(),
             event_sender,
             // TODO: avoid the channel initiation here.
@@ -84,13 +102,72 @@ impl<A: 'static + Adapter> Socket<A> {
         }
     }
 
-    fn set_transport(&mut self, transport: Transport<A>) {
-        self.transport_holder = TransportHolder::new(transport);
+    fn create_transport(
+        transport_create_data: TransportCreateData<A::WsHandle>,
+    ) -> (
+        Transport<A>,
+        broadcast::Sender<TransportEvent>,
+        broadcast::Receiver<TransportEvent>,
+    ) {
+        let (transport_event_sender, transport_event_receiver) = broadcast::channel(128);
+        let transport: Transport<A> = match transport_create_data {
+            TransportCreateData::WebSocket {
+                supports_binary,
+                socket,
+            } => Transport::WebSocket(A::WebSocket::new(
+                WebsocketTransportOptions {
+                    per_message_deflate: true,
+                    supports_binary: supports_binary,
+                },
+                transport_event_sender.clone(),
+                socket,
+            )),
+            TransportCreateData::Polling { jsonp } => {
+                Transport::Polling(A::Polling::new(
+                    PollingTransportOptions {
+                        // FIXME: get these options from somewhere
+                        max_http_buffer_size: 1024,
+                        http_compression: None,
+                        jsonp,
+                    },
+                    transport_event_sender.clone(),
+                ))
+            }
+        };
+        (transport, transport_event_sender, transport_event_receiver)
+    }
+
+    fn set_transport(&mut self, transport_create_data: TransportCreateData<A::WsHandle>) {
+        let (transport, transport_event_sender, transport_event_receiver) =
+            Self::create_transport(transport_create_data);
+        self.transport_holder =
+            TransportHolder::new(transport, transport_event_sender, transport_event_receiver);
+    }
+
+    pub fn get_transport(&self) -> &Transport<A> {
+        &self.transport_holder.transport
+    }
+
+    pub fn get_transport_mut(&mut self) -> &mut Transport<A> {
+        &mut self.transport_holder.transport
+    }
+
+    pub fn get_transport_mut_as_polling(&mut self) -> Result<&mut A::Polling, ServerError> {
+        let transport = self.get_transport_mut();
+        if let Transport::Polling(transport) = transport {
+            Ok(transport)
+        } else {
+            // TODO: add error details: Not expecting a websocket transport at the moment
+            Err(ServerError::Unknown)
+        }
+    }
+
+    pub fn get_transport_kind(&self) -> TransportKind {
+        self.transport_holder.transport.get_transport_kind()
     }
 
     pub async fn open(&mut self, server_options: &ServerOptions) {
         self.ready_state = ReadyState::Open;
-        self.transport_holder.transport.set_sid(self.id.clone());
 
         // Send the open packet as json string
         self.send_open_packet(server_options).await;
@@ -103,14 +180,14 @@ impl<A: 'static + Adapter> Socket<A> {
         self.set_ping_timeout();
     }
 
-    pub async fn close(&mut self, discard: bool) {
+    pub fn close(&mut self, discard: bool) {
         if self.ready_state == ReadyState::Open {
             self.ready_state = ReadyState::Closing {
                 with_discard: discard,
             };
 
             if self.write_buffer.is_empty() {
-                self.transport_holder.transport.close().await;
+                self.transport_holder.transport.close();
             }
             // If the write buffer is not empty, the original engine.io
             // JS implementation waits for the drain event to occur
@@ -159,9 +236,37 @@ impl<A: 'static + Adapter> Socket<A> {
         .await;
     }
 
-    pub fn maybe_upgrade(&mut self, transport: A::WebSocket) {
+    pub async fn handle_polling_request(
+        &mut self,
+        request_context: RequestContext,
+        body: Option<A::Body>,
+    ) -> Result<A::Response, ServerError> {
+        let transport = self.get_transport_mut_as_polling()?;
+        match transport.handle_request(&request_context, body).await? {
+            RequestReply::Action(event) => {
+                match event {
+                    TransportEvent::Drain => {
+                        if let Some(packets) = self.flush().await {
+                            let transport = self.get_transport_mut_as_polling()?;
+                            transport.respond_with_packets(&request_context, packets)
+                        } else {
+                            // TODO: details!s
+                            Err(ServerError::BadRequest)
+                        }
+                    }
+                    _ => {
+                        // TODO: what?
+                        Err(ServerError::Unknown)
+                    }
+                }
+            }
+            RequestReply::Response(response) => Ok(response),
+        }
+    }
+
+    pub fn maybe_upgrade(&mut self, transport_create_data: TransportCreateData<A::WsHandle>) {
         // TODO: lots of things here
-        self.set_transport(Transport::WebSocket(transport));
+        self.set_transport(transport_create_data);
     }
 
     // One method that's missing here is `clearTransport` which you can find in
@@ -174,8 +279,8 @@ impl<A: 'static + Adapter> Socket<A> {
         self.transport_holder.transport.close().await;
     }
 
-    async fn flush(&mut self) {
-        let transport = &self.transport_holder.transport;
+    async fn flush(&mut self) -> Option<Vec<Packet>> {
+        let transport = &mut self.transport_holder.transport;
         if self.ready_state != ReadyState::Closed
             && transport.is_writable()
             && self.write_buffer.len() > 0
@@ -189,8 +294,12 @@ impl<A: 'static + Adapter> Socket<A> {
 
             // Replace the write buffer with an empty one, take the ownership
             // of the full one and send it to transport
-            let buffer = mem::replace(&mut self.write_buffer, Vec::new());
-            transport.send(&buffer).await;
+            let mut buffer = Some(mem::replace(&mut self.write_buffer, Vec::new()));
+            if let Transport::Polling(_) = transport {
+                // `.send` doesn't really do anything for Polling transport.
+                //
+                transport.send(buffer.take().unwrap()).await;
+            }
 
             // The original engine.io JS implementation does this weird duck-typed
             // thing in `sentCallbackFn` to collect callbacks in batches when
@@ -208,7 +317,8 @@ impl<A: 'static + Adapter> Socket<A> {
             self.flushed_callbacks.extend(flushed_callbacks);
 
             // Send a 'drain' event to the server, which will forward it to external listeners
-            self.event_sender
+            let _ = self
+                .event_sender
                 .send(SocketEvent::Drain {
                     socket_id: id.clone(),
                 })
@@ -223,10 +333,15 @@ impl<A: 'static + Adapter> Socket<A> {
                     transport.close().await;
                 }
             }
+
+            if let Some(buffer) = buffer {
+                return Some(buffer);
+            }
         }
+        None
     }
 
-    fn get_available_upgrades(&self) -> Vec<&str> {
+    pub fn get_available_upgrades(&self) -> Vec<&str> {
         unimplemented!();
     }
 
@@ -282,6 +397,9 @@ impl<A: 'static + Adapter> Socket<A> {
                 _ => self.on_close(SocketError::TransportError, "FIXME").await,
             }
         }
+        self.event_sender.send(SocketEvent::Error {
+            socket_id: self.id.clone(),
+        });
     }
 
     // on new packet from the transport
@@ -338,6 +456,10 @@ impl<A: 'static + Adapter> Socket<A> {
         }
     }
 
+    async fn on_flush(&mut self) {
+        self.flush().await;
+    }
+
     async fn on_drain(&mut self) {
         if !self.flushed_callbacks.is_empty() {
             // Unlike the original JS implementation, we're not passing the
@@ -361,15 +483,15 @@ impl<A: 'static + Adapter> Socket<A> {
 }
 
 pub async fn subscribe_socket_to_transport_events<A: 'static + Adapter>(
-    socket: Arc<Mutex<Socket<A>>>,
+    socket: Arc<AsyncMutex<Socket<A>>>,
 ) {
     let receiver = {
         let socket = socket.lock().await;
-        socket.transport_holder.transport_event_receiver.clone()
+        socket.transport_holder.transport_event_sender.subscribe()
     };
     let subscriber_task = async move {
-        let mut receiver = receiver.lock().await;
-        while let Some(message) = receiver.recv().await {
+        let mut receiver = receiver;
+        while let Ok(message) = receiver.recv().await {
             let _ = match message {
                 TransportEvent::Error { error } => {
                     println!("transport error");
@@ -381,7 +503,9 @@ pub async fn subscribe_socket_to_transport_events<A: 'static + Adapter>(
                 }
                 TransportEvent::Drain => {
                     println!("on drain");
-                    socket.lock().await.on_drain().await;
+                    let mut socket = socket.lock().await;
+                    socket.on_flush().await;
+                    socket.on_drain().await;
                 }
                 TransportEvent::Close => {
                     println!("on close");

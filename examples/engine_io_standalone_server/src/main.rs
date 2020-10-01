@@ -1,19 +1,25 @@
-use engine_io::server::{Server, ServerEvent, ServerOptions};
+use engine_io_server::adapter::{Adapter, ListenOptions};
+use engine_io_server::server::{ServerEvent, ServerOptions};
 use engine_io_standalone::standalone::StandaloneAdapter;
+use engine_io_standalone::standalone::WarpAdapterOptions;
 use std::net::SocketAddr;
 use tokio::prelude::*;
 
-#[tokio::main(core_threads = 1)]
+#[tokio::main(core_threads = 4)]
 async fn main() -> io::Result<()> {
-    println!("Hello, world!");
+    println!("Starting standalone adapter!");
 
-    let adapter = StandaloneAdapter::new(SocketAddr::from(([127, 0, 0, 1], 3000)));
     let server_options = ServerOptions::default();
-    let (server, event_listener) = Server::new(adapter, server_options);
-    let mut event_listener = event_listener;
+    let adapter_options = WarpAdapterOptions {
+        socket_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
+        buffer_factor: 32usize,
+        request_body_content_limit: 1024 * 1024 * 16,
+    };
+    let server = StandaloneAdapter::new(server_options, adapter_options);
+    let mut event_listener = server.subscribe().await;
 
     tokio::spawn(async move {
-        while let Some(message) = event_listener.recv().await {
+        while let Ok(message) = event_listener.recv().await {
             let _ = match message {
                 ServerEvent::Connection { connection_id } => {
                     println!("new connection from {}!", connection_id);
@@ -31,7 +37,7 @@ async fn main() -> io::Result<()> {
     });
 
     tokio::select! {
-        res = server.listen() => {
+        res = server.listen(ListenOptions::default()) => {
             if let Err(err) = res {
                 panic!("failed to listen: {}", err);
             }

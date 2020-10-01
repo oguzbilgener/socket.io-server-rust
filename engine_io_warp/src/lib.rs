@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
+extern crate engine_io_server;
+extern crate engine_io_parser;
 extern crate warp;
+extern crate serde;
 
-pub use engine_io_warp::polling;
-pub use engine_io_warp::adapter_warp as standalone;
-pub use engine_io_warp::websocket;
+pub mod polling;
+pub mod adapter_warp;
+pub mod websocket;
 
 #[cfg(test)]
 mod tests {
