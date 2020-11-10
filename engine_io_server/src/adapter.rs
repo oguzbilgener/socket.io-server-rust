@@ -1,3 +1,4 @@
+use crate::packet::Packet;
 use crate::server::{ServerEvent, ServerOptions};
 use crate::transport::{PollingTransport, TransportBase, WebsocketTransport};
 use async_trait::async_trait;
@@ -22,8 +23,8 @@ impl Default for ListenOptions {
 
 #[async_trait]
 pub trait Adapter: 'static + Send + Sync + Sized {
-    type WebSocket: TransportBase<Self::Response> + WebsocketTransport<Self::WsHandle>;
-    type Polling: TransportBase<Self::Response> + PollingTransport<Self::Response, Self::Body>;
+    type WebSocket: TransportBase<Self::Response> + WebsocketTransport<Self>;
+    type Polling: TransportBase<Self::Response> + PollingTransport<Self>;
     type Options: 'static + Default + Clone;
     type Response: 'static + Send + Sync + Sized;
     type Body: 'static + Send + Sync + Sized;
@@ -32,7 +33,11 @@ pub trait Adapter: 'static + Send + Sync + Sized {
     fn new(server_options: ServerOptions, options: Self::Options) -> Self;
 
     async fn listen(&self, options: ListenOptions) -> std::io::Result<()>;
-    async fn subscribe(&self) -> broadcast::Receiver<ServerEvent>;
+    fn subscribe(&self) -> broadcast::Receiver<ServerEvent>;
+    // TODO: this should be a drop instead
     async fn close(&self);
+    // TODO: this should be called drop_socket or remove_socket
     async fn close_socket(&self, connection_id: &str);
+    // TODO: callback?
+    async fn send_packet(&self, connection_id: &str, packet: Packet);
 }

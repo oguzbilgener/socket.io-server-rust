@@ -16,7 +16,7 @@ async fn main() -> io::Result<()> {
         request_body_content_limit: 1024 * 1024 * 16,
     };
     let server = StandaloneAdapter::new(server_options, adapter_options);
-    let mut event_listener = server.subscribe().await;
+    let mut event_listener = server.subscribe();
 
     tokio::spawn(async move {
         while let Ok(message) = event_listener.recv().await {
@@ -25,6 +25,7 @@ async fn main() -> io::Result<()> {
                     println!("new connection from {}!", connection_id);
                 }
                 ServerEvent::Message {
+                    context,
                     connection_id,
                     data,
                 } => {

@@ -1,20 +1,34 @@
-use engine_io_parser::packet::ParsePacketError;
 use crate::server::CookieOptions;
 use crate::transport::TransportKind;
+use crate::adapter::Adapter;
+use engine_io_parser::packet::ParsePacketError;
 use serde::Serialize;
 use std::collections::HashMap;
 
 // FIXME: rename this to HttpRequestContext?
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RequestContext {
     pub query: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     pub origin: Option<String>,
+    pub secure:  bool,
     pub user_agent: String,
     pub content_type: String,
     pub transport_kind: TransportKind,
     pub http_method: HttpMethod,
     pub remote_address: String,
+    pub request_url: String,
     pub set_cookie: Option<SetCookie>,
+}
+
+impl RequestContext {
+    // TODO: take
+    pub fn with_set_cookie(&self, set_cookie: Option<SetCookie>) -> RequestContext {
+        RequestContext {
+            set_cookie,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Display, Debug, Copy, Clone, PartialEq)]
@@ -71,7 +85,7 @@ impl From<ParsePacketError> for ServerError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetCookie {
     pub name: String,
     pub value: String,
@@ -99,8 +113,13 @@ impl SetCookie {
 }
 
 impl From<SetCookie> for String {
-
     fn from(set_cookie: SetCookie) -> String {
-        "".to_owned()
+        todo!();
     }
 }
+
+#[derive(Display, Debug, Clone, PartialEq)]
+pub enum SendPacketError {
+    UnknownConnectionId,
+}
+

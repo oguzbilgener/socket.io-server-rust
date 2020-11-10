@@ -6,6 +6,7 @@ use engine_io_parser::packet::Packet;
 use futures::stream;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc};
 use tokio::sync::broadcast;
 
 #[async_trait]
@@ -13,46 +14,46 @@ pub trait TransportBase<R>: 'static + Send + Sync
 where
     R: 'static + Send + Sync + Sized,
 {
-    async fn close(&mut self);
-    fn discard(&self);
-    async fn send(&mut self, packets: Vec<Packet>);
     fn is_writable(&self) -> bool;
 }
 
 #[async_trait]
-pub trait PollingTransport<R, B>
+pub trait PollingTransport<A>
 where
-    R: 'static + Send + Sync + Sized,
-    B: 'static,
+    A: 'static + Adapter,
 {
     fn new(
         options: PollingTransportOptions,
         sender: broadcast::Sender<TransportEvent>,
+        receiver: broadcast::Receiver<TransportCmd>,
     ) -> Self;
 
     // TODO: come up with a better error type?
     fn respond_with_packets(
         &self,
-        request_context: &RequestContext,
+        request_context: Arc<RequestContext>,
         packets: Vec<Packet>,
-    ) -> Result<R, ServerError>;
+    ) -> Result<A::Response, ServerError>;
 
+    // TODO: can we make this non async?
     async fn handle_request(
         &self,
-        request_context: &RequestContext,
-        body: Option<B>,
-    ) -> RequestResult<R>;
+        request_context: Arc<RequestContext>,
+        body: Option<A::Body>,
+    ) -> RequestResult<A::Response>;
 }
 
 #[async_trait]
-pub trait WebsocketTransport<S>
+pub trait WebsocketTransport<A>
 where
-    S: 'static,
+    A: 'static + Adapter,
 {
     fn new(
         options: WebsocketTransportOptions,
         sender: broadcast::Sender<TransportEvent>,
-        socket: S,
+        socket: A::WsHandle,
+        upgrade_request_context: Arc<RequestContext>,
+        receiver: broadcast::Receiver<TransportCmd>,
     ) -> Self;
 }
 
@@ -67,6 +68,13 @@ impl<A: 'static + Adapter> Transport<A> {
         match self {
             Transport::WebSocket(_) => true,
             Transport::Polling(_) => false,
+        }
+    }
+
+    pub fn as_polling_or_fail(&self) -> Result<&A::Polling, ServerError> {
+        match self {
+            Transport::WebSocket(_) => Err(ServerError::BadRequest),
+            Transport::Polling(polling) => Ok(polling),
         }
     }
 }
@@ -99,8 +107,6 @@ pub enum TransportCreateData<S>
 where
     S: 'static,
 {
-    // TODO: in engine.io 4.0, polling doesn't support binary
-    // https://github.com/socketio/engine.io/commit/c099338e04bb5a93b8997c871c27d238455d2deb
     Polling { jsonp: bool },
     WebSocket { supports_binary: bool, socket: S },
 }
@@ -131,9 +137,22 @@ pub enum TransportError {
 }
 
 #[derive(Display, Debug, Clone, PartialEq)]
+pub enum TransportCmd {
+    // We have no close or discard methods / events to the current transport.
+    // Dropping a transport means closing it and killing its sub tasks
+    Send { packets: Vec<Packet> },
+}
+
+/// Events that are sent from the Transport back to the Socket
+#[derive(Display, Debug, Clone, PartialEq)]
 pub enum TransportEvent {
-    Error { error: TransportError },
-    Packet { packet: Packet },
+    Error {
+        error: TransportError,
+    },
+    Packet {
+        context: Arc<RequestContext>,
+        packet: Packet,
+    },
     Drain,
     Close,
 }
@@ -180,10 +199,10 @@ impl<R: 'static> From<R> for RequestReply<R> {
 pub type RequestResult<R> = Result<RequestReply<R>, ServerError>;
 
 pub fn get_common_polling_response_headers(
-    request_context: &RequestContext,
+    request_context: Arc<RequestContext>,
     xhr: bool,
-) -> HashMap<&str, String> {
-    let mut headers: HashMap<&str, String> = HashMap::new();
+) -> HashMap<&'static str, String> {
+    let mut headers: HashMap<&'static str, String> = HashMap::new();
 
     let user_agent = &request_context.user_agent;
     if user_agent.contains(";MSIE") || user_agent.contains("Trident/") {
@@ -201,39 +220,55 @@ pub fn get_common_polling_response_headers(
     headers
 }
 
-// Kind of unfortunate that we have to implement this...
-// I wonder if there's a shorter way to do it.
 #[async_trait]
 impl<A: 'static + Adapter> TransportBase<A::Response> for Transport<A> {
-    #[inline]
-    async fn close(&mut self) {
-        match self {
-            Transport::WebSocket(transport) => transport.close().await,
-            Transport::Polling(transport) => transport.close().await,
-        }
-    }
-
-    #[inline]
-    fn discard(&self) {
-        match self {
-            Transport::WebSocket(transport) => transport.discard(),
-            Transport::Polling(transport) => transport.discard(),
-        }
-    }
-
-    #[inline]
-    async fn send(&mut self, packets: Vec<Packet>) {
-        match self {
-            Transport::WebSocket(transport) => transport.send(packets).await,
-            Transport::Polling(transport) => transport.send(packets).await,
-        }
-    }
-
     #[inline]
     fn is_writable(&self) -> bool {
         match self {
             Transport::WebSocket(transport) => transport.is_writable(),
             Transport::Polling(transport) => transport.is_writable(),
+        }
+    }
+}
+
+impl<A> Transport<A>
+where
+    A: 'static + Adapter,
+{
+    pub(crate) fn create(
+        context: Arc<RequestContext>,
+        transport_create_data: TransportCreateData<A::WsHandle>,
+        transport_cmd_receiver: broadcast::Receiver<TransportCmd>,
+    ) -> Transport<A> {
+        // TODO: make this customizable
+        let (transport_event_sender, _) = broadcast::channel(128);
+
+        match transport_create_data {
+            TransportCreateData::WebSocket {
+                supports_binary,
+                socket,
+            } => Transport::WebSocket(A::WebSocket::new(
+                WebsocketTransportOptions {
+                    per_message_deflate: true,
+                    supports_binary: supports_binary,
+                },
+                transport_event_sender.clone(),
+                socket,
+                context,
+                transport_cmd_receiver,
+            )),
+            TransportCreateData::Polling { jsonp } => {
+                Transport::Polling(A::Polling::new(
+                    PollingTransportOptions {
+                        // FIXME: get these options from somewhere
+                        max_http_buffer_size: 1024,
+                        http_compression: None,
+                        jsonp,
+                    },
+                    transport_event_sender.clone(),
+                    transport_cmd_receiver,
+                ))
+            }
         }
     }
 }

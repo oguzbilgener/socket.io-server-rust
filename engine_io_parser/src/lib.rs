@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 extern crate base64;
 extern crate nom;
 

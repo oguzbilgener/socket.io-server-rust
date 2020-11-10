@@ -108,8 +108,10 @@ impl TryFrom<ProtoDataValue> for PacketDataValue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct Packet {
     pub packet_type: PacketType,
+    // this is ack id?
     pub id: Option<u64>,
     pub nsp: String,
     pub data: PacketDataValue,

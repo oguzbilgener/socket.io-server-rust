@@ -1,9 +1,11 @@
 use crate::namespace::Namespace;
+use crate::socket::Handshake;
 use crate::storage::Storage;
 use core::default::Default;
 use engine_io_server::adapter::{Adapter, ListenOptions};
 use engine_io_server::server::BUFFER_CONST;
 use engine_io_server::server::{ServerEvent as EngineEvent, ServerOptions as EngineOptions};
+use engine_io_server::util::RequestContext;
 use regex::Regex;
 use serde_json::json;
 use socket_io_parser::decoder::Decoder;
@@ -12,9 +14,8 @@ use socket_io_parser::packet::PacketParseError;
 use socket_io_parser::packet::{Packet, PacketDataValue, PacketType, ProtoPacket};
 use socket_io_parser::parser::Parser;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::sync::Arc;
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
 pub struct ServerState<D, S>
@@ -93,11 +94,17 @@ where
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
-    /// Socket ID
     Connect {
+        // Engine Socket ID
         connection_id: String,
+        context: Arc<RequestContext>,
         nsp: String,
         data: PacketDataValue,
+    },
+    Packet {
+        connection_id: String,
+        context: Arc<RequestContext>,
+        packet: Packet,
     },
     Error,
 }
@@ -135,28 +142,32 @@ where
         }
     }
 
-    pub async fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         let event_receiver_temp = self.state.write().unwrap().event_receiver_temp.take();
         if let Some(event_receiver) = event_receiver_temp {
-            let client_event_sender = self.subscribe_to_client_events().await;
-            self.subscribe_to_engine_events(client_event_sender).await;
+            let client_event_sender = self.subscribe_to_client_events(self.adapter.clone());
+            self.subscribe_to_engine_events(client_event_sender);
             event_receiver
         } else {
             self.event_sender.subscribe()
         }
     }
 
-    async fn subscribe_to_engine_events(
+    pub fn send_packet(&self, socket_id: &str, packet: Packet) {
+        todo!();
+    }
+
+    fn subscribe_to_engine_events(
         &self,
         client_event_sender: mpsc::UnboundedSender<ClientEvent>,
     ) {
-        let mut event_listener = self.adapter.subscribe().await;
+        let mut engine_event_listener = self.adapter.subscribe();
         let state = self.state.clone();
-        let event_sender = self.event_sender.clone();
+        let server_event_sender = self.event_sender.clone();
         let adapter = self.adapter.clone();
 
         tokio::spawn(async move {
-            while let Ok(message) = event_listener.recv().await {
+            while let Ok(message) = engine_event_listener.recv().await {
                 let _ = match message {
                     // socket.io/lib/index.ts :: onconnection
                     EngineEvent::Connection { connection_id } => {
@@ -166,13 +177,15 @@ where
                     // socket.io/lib/client.ts :: ondata
                     EngineEvent::Message {
                         connection_id,
+                        context,
                         data,
                     } => {
                         tokio::spawn(handle_new_message(
                             connection_id,
+                            context,
                             data,
                             state.clone(),
-                            event_sender.clone(),
+                            server_event_sender.clone(),
                             client_event_sender.clone(),
                         ));
                     }
@@ -189,26 +202,48 @@ where
         });
     }
 
-    async fn subscribe_to_client_events(&self) -> mpsc::UnboundedSender<ClientEvent> {
+    fn subscribe_to_client_events(
+        &self,
+        adapter: Arc<A>,
+    ) -> mpsc::UnboundedSender<ClientEvent> {
         let (event_sender, mut event_receiver) =
             tokio::sync::mpsc::unbounded_channel::<ClientEvent>();
         let state = self.state.clone();
 
         tokio::spawn(async move {
             while let Some(message) = event_receiver.recv().await {
-                let _ = match message {
+                let handle_result = match message {
                     ClientEvent::Connect {
                         connection_id,
+                        context,
                         nsp: namespace,
                         data,
+                    } => handle_client_connect(
+                        state.clone(),
+                        namespace,
+                        connection_id,
+                        context,
+                        adapter.clone(),
+                        data,
+                    ),
+                    ClientEvent::Packet {
+                        connection_id,
+                        context,
+                        packet,
                     } => {
-                        handle_client_connect(state.clone(), namespace, connection_id, data)
-                        // TODO: somehow implement client.js :: doConnect and server.js :: _checkNamespace
+                        println!("new socket.io packet from the client!");
+                        todo!();
                     }
                     ClientEvent::Error => {
                         todo!();
                     }
-                };
+                }.await;
+                // TODO: Right now there is no way we can propagate this event
+                // back to the engine layer when the transport type is Polling.
+                handle_result.map_err(|err_packet| {
+                    // TODO: send the packet???????
+                    todo!();
+                });
             }
         });
         event_sender
@@ -229,6 +264,7 @@ impl From<PacketParseError> for HandleEngineMessageError {
 
 pub async fn handle_new_message<D, S>(
     connection_id: String,
+    context: Arc<RequestContext>,
     data: EnginePacketData,
     state: Arc<RwLock<ServerState<D, S>>>,
     server_event_sender: broadcast::Sender<ServerEvent>,
@@ -288,6 +324,7 @@ pub async fn handle_new_message<D, S>(
                     // "ondecoded" from client.ts
                     handle_packet_from_client(
                         connection_id,
+                        context,
                         packet,
                         state,
                         server_event_sender,
@@ -310,6 +347,7 @@ pub async fn handle_new_message<D, S>(
                             // another "ondecoded" from client.ts
                             handle_packet_from_client(
                                 connection_id,
+                                context,
                                 packet,
                                 server_state,
                                 server_event_sender,
@@ -336,6 +374,7 @@ pub async fn handle_new_message<D, S>(
 // `ondecoded` from client.ts
 fn handle_packet_from_client<D, S>(
     connection_id: String,
+    context: Arc<RequestContext>,
     packet: Packet,
     state: Arc<RwLock<ServerState<D, S>>>,
     server_event_sender: broadcast::Sender<ServerEvent>,
@@ -346,27 +385,34 @@ fn handle_packet_from_client<D, S>(
 {
     match packet.packet_type {
         PacketType::Connect => {
-            // TODO: handle send error
             let _ = client_event_sender.send(ClientEvent::Connect {
                 connection_id: connection_id.clone(),
+                context,
                 nsp: packet.nsp,
                 data: packet.data,
             });
         }
         _ => {
-            // TODO: find the namespace for the socket and send `_onpacket`. from client.ts
+            let _ = client_event_sender.send(ClientEvent::Packet {
+                connection_id: connection_id.clone(),
+                context,
+                packet,
+            });
         }
     }
 }
 
 // TODO: Make the auth parameter generic
-async fn handle_client_connect<D, S>(
+async fn handle_client_connect<A, D, S>(
     state: Arc<RwLock<ServerState<D, S>>>,
     namespace_name: String,
     connection_id: String,
+    context: Arc<RequestContext>,
+    adapter: Arc<A>,
     auth: PacketDataValue,
 ) -> Result<(), Packet>
 where
+    A: 'static + Adapter,
     D: 'static + Decoder,
     S: 'static + Storage,
 {
@@ -398,7 +444,22 @@ where
 
     let namespace = get_namespace(state.clone(), NamespaceDescriptor::Text(namespace_name)).await;
     if let Some(namespace) = namespace {
-        namespace.add_connection(connection_id, auth);
+        let handshake = Handshake::new(&context, auth);
+        let socket_id = namespace.add_connection(handshake);
+        send_packet_to_adapter(
+            adapter,
+            &connection_id,
+            Packet {
+                packet_type: PacketType::Connect,
+                id: None,
+                nsp: namespace.name,
+                data: serde_json::json!({
+                    "sid": socket_id.clone()
+                })
+                .into(),
+            },
+        )
+        .await;
     } else {
         // TODO: return an error somehow?
     }
@@ -406,7 +467,10 @@ where
     Ok(())
 }
 
-async fn check_namespace<D, S>(state: Arc<RwLock<ServerState<D, S>>>, auth: &PacketDataValue) -> bool
+async fn check_namespace<D, S>(
+    state: Arc<RwLock<ServerState<D, S>>>,
+    auth: &PacketDataValue,
+) -> bool
 where
     D: 'static + Decoder,
     S: 'static + Storage,
@@ -440,6 +504,13 @@ async fn setup_connect_timer(connection_id: String) {
 async fn clear_connect_timer<D, S>(state: Arc<RwLock<ServerState<D, S>>>, connection_id: &str)
 where
     D: 'static + Decoder,
-    S: 'static + Storage {
-        todo!()
-    }
+    S: 'static + Storage,
+{
+    todo!()
+}
+
+async fn send_packet_to_adapter<A>(adapter: Arc<A>, connection_id: &str, packet: Packet)
+where
+    A: 'static + Adapter,
+{
+}

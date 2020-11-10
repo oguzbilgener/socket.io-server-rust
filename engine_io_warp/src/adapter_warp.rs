@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use warp::http::header::{CONTENT_TYPE, ORIGIN, USER_AGENT};
+use warp::http::HeaderMap;
 use warp::http::Response;
 use warp::hyper::Body;
 use warp::path::{self, FullPath};
@@ -22,6 +23,7 @@ use warp::reply::Reply;
 use warp::ws::{Message, WebSocket, Ws};
 use warp::{Filter, Rejection};
 
+#[derive(Clone)]
 pub struct WarpAdapterOptions {
     pub socket_addr: SocketAddr,
     pub buffer_factor: usize,
@@ -82,6 +84,10 @@ async fn on_data_request(
     }
 }
 
+fn headers_into_map(headers: HeaderMap) -> HashMap<String, String> {
+    todo!();
+}
+
 fn with_server(
     server: Arc<Server<StandaloneAdapter>>,
 ) -> impl Filter<Extract = (Arc<Server<StandaloneAdapter>>,), Error = Infallible> + Clone {
@@ -92,13 +98,17 @@ fn build_context(
     http_method: HttpMethod,
 ) -> impl Filter<Extract = (RequestContext,), Error = Rejection> + Copy + Clone {
     warp::any()
+        .and(warp::header::headers_cloned())
+        .and(warp::path::full())
         .and(warp::query::<HashMap<String, String>>())
         .and(warp::header::header(USER_AGENT.as_str()))
         .and(warp::header::header(ORIGIN.as_str()))
         .and(warp::header::header(CONTENT_TYPE.as_str()))
         .and(warp::addr::remote())
         .and_then(
-            move |query: HashMap<String, String>,
+            move |headers: HeaderMap,
+                  path: warp::path::FullPath,
+                  query: HashMap<String, String>,
                   user_agent: String,
                   origin: String,
                   content_type: String,
@@ -106,13 +116,17 @@ fn build_context(
                 let transport_name: &str = query.get("transport").map_or("polling", String::as_str);
                 match TransportKind::parse(transport_name) {
                     Ok(transport_kind) => Ok(RequestContext {
+                        headers: headers_into_map(headers),
                         query,
                         origin: Some(origin),
+                        secure: false,
                         user_agent,
                         content_type,
                         transport_kind,
                         http_method,
                         remote_address: address.unwrap().to_string(),
+                        // TODO: Fix this!!!
+                        request_url: path.as_str().to_owned(),
                         set_cookie: None,
                     }),
                     Err(server_error) => Err(warp::reject::custom(WarpError {
@@ -166,9 +180,11 @@ impl Adapter for StandaloneAdapter {
             .and(warp::get())
             .and(with_server(self.server.clone()))
             .and(build_context(HttpMethod::Get))
-            .and_then(|_path: String, server: Arc<Server<Self>>, context: RequestContext| {
-                on_poll_request(server, context)
-            });
+            .and_then(
+                |_path: String, server: Arc<Server<Self>>, context: RequestContext| {
+                    on_poll_request(server, context)
+                },
+            );
         let data_endpoint = path_from_str(options.path)
             .and(warp::post())
             .and(warp::body::content_length_limit(
@@ -203,11 +219,12 @@ impl Adapter for StandaloneAdapter {
         Ok(())
     }
 
-    async fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
-        self.server.subscribe().await
+    fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+        self.server.subscribe()
     }
 
     async fn close(&self) {
+        // TODO: this should be a drop instead...
         todo!();
     }
 
@@ -217,13 +234,17 @@ impl Adapter for StandaloneAdapter {
 }
 
 // A very lazy path filter (Because warp doesn't have one)
-fn path_from_str(scheme: &'static str) -> impl Filter<Extract = (String, ), Error = Rejection> + Copy {
-    warp::path("/").and(warp::path::full()).and_then(move |path: FullPath| async move {
-        let full_path = path.as_str();
-        let scheme = scheme.split('&').collect::<Vec<&str>>()[0];
-        if !full_path.starts_with(scheme) {
-            return Err(warp::reject::not_found())
-        }
-        Ok(full_path.to_owned())
-    })
+fn path_from_str(
+    scheme: &'static str,
+) -> impl Filter<Extract = (String,), Error = Rejection> + Copy {
+    warp::path("/")
+        .and(warp::path::full())
+        .and_then(move |path: FullPath| async move {
+            let full_path = path.as_str();
+            let scheme = scheme.split('&').collect::<Vec<&str>>()[0];
+            if !full_path.starts_with(scheme) {
+                return Err(warp::reject::not_found());
+            }
+            Ok(full_path.to_owned())
+        })
 }
