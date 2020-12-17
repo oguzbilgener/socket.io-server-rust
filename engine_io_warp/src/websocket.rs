@@ -5,13 +5,12 @@ use engine_io_parser::decoder::{decode_packet, Encoded};
 use engine_io_parser::string::encoder as string_encoder;
 use engine_io_server::packet::Packet;
 use engine_io_server::transport::{
-    TransportBase, TransportCmd, TransportEvent, WebsocketTransport,
-    WebsocketTransportOptions,
+    TransportBase, TransportCmd, TransportEvent, WebsocketTransport, WebsocketTransportOptions,
 };
 use engine_io_server::util::RequestContext;
 use futures::future::{AbortHandle, Abortable};
 use futures::stream::{self, SplitSink, SplitStream};
-use futures::{StreamExt};
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify};
 use warp::ws::{Message, WebSocket};
@@ -54,7 +53,6 @@ impl WebsocketTransport<StandaloneAdapter> for WarpWebsocketTransport {
 
 #[async_trait]
 impl TransportBase<AdapterResponse> for WarpWebsocketTransport {
-
     fn is_writable(&self) -> bool {
         // TODO: Is this right? Do we need this anymore?
         true

@@ -41,6 +41,7 @@ pub enum SocketEvent {
     },
     Close {
         socket_id: String,
+        reason: SocketCloseReason,
     },
     Flush {
         socket_id: String,
@@ -96,9 +97,17 @@ enum CallbackBatch {
     Framed { callback: Callback },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SocketError {
     TransportError,
-    ParseError,
+    PacketParseError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SocketCloseReason {
+    Error(SocketError),
+    TransportClosed,
+    TerminatedByServer,
 }
 
 impl<A> Socket<A>
@@ -397,7 +406,7 @@ where
     }
 
     /// Called upon transport considered closed.
-    async fn on_close(&self, reason: SocketError, description: &str) {
+    async fn on_close(&self, reason: SocketCloseReason, description: &str) {
         let ready = self.state.read().unwrap().ready;
         let mut event_sender = self.senders.socket.clone();
         let socket_id = self.id.clone();
@@ -415,7 +424,7 @@ where
             self.close_transport();
 
             // Send a "close" event to server
-            let _ = event_sender.send(SocketEvent::Close { socket_id }).await;
+            let _ = event_sender.send(SocketEvent::Close { socket_id, reason }).await;
         }
     }
 
@@ -427,9 +436,9 @@ where
                 // Used instead of the `error` type, undocumented pseudo packet in
                 // the JS implementation
                 TransportError::PacketParseError => {
-                    self.on_close(SocketError::ParseError, "FIXME").await
+                    self.on_close(SocketCloseReason::Error(SocketError::PacketParseError), "FIXME").await
                 }
-                _ => self.on_close(SocketError::TransportError, "FIXME").await,
+                _ => self.on_close(SocketCloseReason::Error(SocketError::TransportError), "FIXME").await,
             }
         }
         event_sender.send(SocketEvent::Error {
@@ -551,7 +560,7 @@ pub async fn subscribe_socket_to_transport_events<A: 'static + Adapter>(socket: 
                 TransportEvent::Close => {
                     println!("on close");
                     // TODO: fix the reason
-                    socket.on_close(SocketError::TransportError, "FIXME").await
+                    socket.on_close(SocketCloseReason::TransportClosed, "FIXME").await
                 }
             };
         }

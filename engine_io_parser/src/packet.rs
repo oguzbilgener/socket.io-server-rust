@@ -46,7 +46,7 @@ impl PacketType {
     ) -> Result<Self, nom::Err<(T, nom::error::ErrorKind)>> {
         match PacketType::try_from(value) {
             Ok(packet_type) => Ok(packet_type),
-            Err(_) => Err(nom::Err::Failure((
+            Err(_) => Err(nom::Err::Error((
                 original_input,
                 nom::error::ErrorKind::Digit,
             ))),

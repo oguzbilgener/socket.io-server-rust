@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub enum Connectivity {
     Connected,
     Disconnected,
+    // TODO: do we even need this, or would dropping Socket mean exactly this?
     Closed,
 }
 

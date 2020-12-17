@@ -2,7 +2,6 @@ use crate::packet::Packet;
 use crate::server::{ServerEvent, ServerOptions};
 use crate::transport::{PollingTransport, TransportBase, WebsocketTransport};
 use async_trait::async_trait;
-use tokio::sync::broadcast;
 
 pub struct ListenOptions {
     pub path: &'static str,
@@ -33,7 +32,7 @@ pub trait Adapter: 'static + Send + Sync + Sized {
     fn new(server_options: ServerOptions, options: Self::Options) -> Self;
 
     async fn listen(&self, options: ListenOptions) -> std::io::Result<()>;
-    fn subscribe(&self) -> broadcast::Receiver<ServerEvent>;
+    fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Option<Vec<Packet>>>;
     // TODO: this should be a drop instead
     async fn close(&self);
     // TODO: this should be called drop_socket or remove_socket

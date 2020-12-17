@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use engine_io_server::adapter::{Adapter, ListenOptions};
 use engine_io_server::server::{Server, ServerEvent, ServerOptions};
+use engine_io_server::packet::Packet;
 use engine_io_server::transport::{TransportEvent, TransportKind};
 use engine_io_server::util::{HttpMethod, RequestContext, ServerError};
 use futures::stream::{SplitSink, SplitStream};
@@ -219,7 +220,7 @@ impl Adapter for StandaloneAdapter {
         Ok(())
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Option<Packet>> {
         self.server.subscribe()
     }
 

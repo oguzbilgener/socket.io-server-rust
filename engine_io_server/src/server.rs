@@ -1,11 +1,13 @@
 use crate::adapter::Adapter;
-use crate::socket::{subscribe_socket_to_transport_events, Callback, Socket, SocketEvent};
+use crate::socket::{
+    subscribe_socket_to_transport_events, Callback, Socket, SocketCloseReason, SocketEvent,
+};
 use crate::transport::{Transport, TransportCreateData, TransportKind};
 use crate::util::{HttpMethod, RequestContext, SendPacketError, ServerError, SetCookie};
 use dashmap::DashMap;
 use engine_io_parser::packet::{Packet, PacketData};
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -40,17 +42,23 @@ pub struct CookieOptions {
 #[derive(Debug, Clone)]
 pub struct EventSenders {
     // Event sender to external owner
-    server: broadcast::Sender<ServerEvent>,
-    /// Event sender to Socket instances
+    server: bmrng::RequestSender<ServerEvent, Option<Packet>>,
+    // server: broadcast::Sender<ServerEvent>,
+    /// Event sender to Socket instances. cloned and passed over
     client: mpsc::Sender<SocketEvent>,
 }
 
-pub struct ServerState {
-    socket_receiver_temp: Option<mpsc::Receiver<SocketEvent>>,
+#[derive(Debug)]
+pub enum ServerState {
+    Unsubscribed {
+        socket_event_receiver: mpsc::Receiver<SocketEvent>,
+        engine_event_receiver: bmrng::RequestReceiver<ServerEvent, Option<Packet>>,
+    },
+    Subscribed,
 }
 
 pub struct Server<A: 'static + Adapter> {
-    state: Arc<RwLock<ServerState>>,
+    state: Arc<Mutex<ServerState>>,
     // TODO: don't use a mutex here, instead have an internal socket state
     clients: Arc<DashMap<String, Arc<Socket<A>>>>,
     event_senders: EventSenders,
@@ -90,6 +98,10 @@ pub enum ServerEvent {
     Connection {
         connection_id: String,
     },
+    Close {
+        connection_id: String,
+        reason: SocketCloseReason,
+    },
     Flush {
         connection_id: String,
     },
@@ -112,11 +124,13 @@ impl<A: 'static + Adapter> Server<A> {
         let (client_event_sender, client_event_receiver) =
             mpsc::channel(options.buffer_factor * BUFFER_CONST);
         // To send events to the owner of this Server instance
-        let (server_event_sender, _) = broadcast::channel(options.buffer_factor * BUFFER_CONST);
+        let (server_event_sender, server_event_receiver) =
+            bmrng::channel(options.buffer_factor * BUFFER_CONST);
 
         Server {
-            state: Arc::new(RwLock::new(ServerState {
-                socket_receiver_temp: Some(client_event_receiver),
+            state: Arc::new(Mutex::new(ServerState::Unsubscribed {
+                socket_event_receiver: client_event_receiver,
+                engine_event_receiver: server_event_receiver,
             })),
             clients: Arc::new(DashMap::new()),
             event_senders: EventSenders {
@@ -127,14 +141,27 @@ impl<A: 'static + Adapter> Server<A> {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
-        // First time calling subscribe, also start listening events from `Socket` instances
-        if let Some(socket_receiver_temp) = self.state.write().unwrap().socket_receiver_temp.take()
-        {
-            self.subscribe_to_socket_events(socket_receiver_temp);
-        }
+    pub fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Option<Packet>> {
+        self.try_subscribe()
+            .expect("Already subscribed to engine_io_server::Server")
+    }
 
-        self.event_senders.server.subscribe()
+    pub fn try_subscribe(
+        &self,
+    ) -> Result<bmrng::RequestReceiver<ServerEvent, Option<Packet>>, AlreadySubscribedError> {
+        let mut state = self.state.lock().unwrap();
+        let old_state = std::mem::replace(&mut *state, ServerState::Subscribed);
+        match old_state {
+            ServerState::Subscribed => Err(AlreadySubscribedError),
+            ServerState::Unsubscribed {
+                socket_event_receiver,
+                engine_event_receiver,
+            } => {
+                // First time calling subscribe, also start listening events from `Socket` instances
+                self.subscribe_to_socket_events(socket_event_receiver);
+                Ok(engine_event_receiver)
+            }
+        }
         // TODO: handle shutdown properly by receiving a shutdown signal
         // sending it to socket instances.
     }
@@ -339,6 +366,7 @@ impl<A: 'static + Adapter> Server<A> {
     }
 
     fn subscribe_to_socket_events(&self, client_event_receiver: mpsc::Receiver<SocketEvent>) {
+        // TODO: listen for responder responses on fallible events
         let server_event_sender = self.event_senders.server.clone();
         let clients = self.clients.clone();
 
@@ -346,8 +374,12 @@ impl<A: 'static + Adapter> Server<A> {
             let mut receiver = client_event_receiver;
             while let Some(message) = receiver.recv().await {
                 match message {
-                    SocketEvent::Close { socket_id } => {
+                    SocketEvent::Close { socket_id, reason } => {
                         clients.remove(&socket_id);
+                        let _ = server_event_sender.send(ServerEvent::Close {
+                            connection_id: socket_id,
+                            reason,
+                        });
                     }
                     SocketEvent::Flush { socket_id } => {
                         // Forward the Flush event to the external listener
@@ -398,3 +430,17 @@ where
     Polling,
     WebSocket { socket: S },
 }
+
+#[derive(Debug)]
+pub struct AlreadySubscribedError;
+
+impl std::fmt::Display for AlreadySubscribedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Already subscribed to this server, cannot subscribe again"
+        )
+    }
+}
+
+impl std::error::Error for AlreadySubscribedError {}

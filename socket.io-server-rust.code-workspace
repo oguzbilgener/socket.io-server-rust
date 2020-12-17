@@ -42,5 +42,6 @@
 			"editor.defaultFormatter": "matklad.rust-analyzer"
 		},
 		"todo-tree.tree.showCountsInTree": true,
+		"remote.SSH.connectTimeout": 300,
 	}
 }
