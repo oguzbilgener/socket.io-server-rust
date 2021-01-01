@@ -181,6 +181,7 @@ pub struct Packet {
     pub data: PacketDataValue,
 }
 
+#[derive(Debug)]
 pub struct MultipartPacketHeader {
     pub packet_type: BinaryPacketType,
     pub id: Option<u64>,

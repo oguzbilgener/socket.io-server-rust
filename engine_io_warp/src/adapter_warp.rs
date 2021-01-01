@@ -220,7 +220,7 @@ impl Adapter for StandaloneAdapter {
         Ok(())
     }
 
-    fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Option<Packet>> {
+    fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Packet> {
         self.server.subscribe()
     }
 

@@ -42,7 +42,7 @@ pub struct CookieOptions {
 #[derive(Debug, Clone)]
 pub struct EventSenders {
     // Event sender to external owner
-    server: bmrng::RequestSender<ServerEvent, Option<Packet>>,
+    server: bmrng::RequestSender<ServerEvent, Packet>,
     // server: broadcast::Sender<ServerEvent>,
     /// Event sender to Socket instances. cloned and passed over
     client: mpsc::Sender<SocketEvent>,
@@ -52,7 +52,7 @@ pub struct EventSenders {
 pub enum ServerState {
     Unsubscribed {
         socket_event_receiver: mpsc::Receiver<SocketEvent>,
-        engine_event_receiver: bmrng::RequestReceiver<ServerEvent, Option<Packet>>,
+        engine_event_receiver: bmrng::RequestReceiver<ServerEvent, Packet>,
     },
     Subscribed,
 }
@@ -141,14 +141,14 @@ impl<A: 'static + Adapter> Server<A> {
         }
     }
 
-    pub fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Option<Packet>> {
+    pub fn subscribe(&self) -> bmrng::RequestReceiver<ServerEvent, Packet> {
         self.try_subscribe()
             .expect("Already subscribed to engine_io_server::Server")
     }
 
     pub fn try_subscribe(
         &self,
-    ) -> Result<bmrng::RequestReceiver<ServerEvent, Option<Packet>>, AlreadySubscribedError> {
+    ) -> Result<bmrng::RequestReceiver<ServerEvent, Packet>, AlreadySubscribedError> {
         let mut state = self.state.lock().unwrap();
         let old_state = std::mem::replace(&mut *state, ServerState::Subscribed);
         match old_state {

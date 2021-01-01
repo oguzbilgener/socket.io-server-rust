@@ -1,18 +1,11 @@
 use chrono::{DateTime, Utc};
+use crate::namespace::SimpleNamespace;
 use engine_io_server::util::RequestContext;
 use socket_io_parser::packet::PacketDataValue;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Connectivity {
-    Connected,
-    Disconnected,
-    // TODO: do we even need this, or would dropping Socket mean exactly this?
-    Closed,
-}
 
 #[derive(Debug, Clone)]
 pub struct Handshake {
@@ -37,7 +30,7 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    pub fn new(context: &RequestContext, auth: PacketDataValue) -> Self {
+    pub(crate) fn new(context: &RequestContext, auth: PacketDataValue) -> Self {
         let time = chrono::Utc::now();
         Self {
             headers: context.headers.clone(),
@@ -55,15 +48,12 @@ impl Handshake {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SocketState {
-    /// This is a combination of the ambiguous `connected `and `disconnected` flags
-    /// from the original socket.io JS implementation
-    connectivity: Connectivity,
 }
 
 impl SocketState {
     pub fn new() -> Self {
         SocketState {
-            connectivity: Connectivity::Connected,
+
         }
     }
 }
@@ -71,19 +61,21 @@ impl SocketState {
 pub struct Socket {
     pub id: String,
     // TODO: do we really need this?
-    state: Arc<RwLock<SocketState>>,
+    state: Arc<Mutex<SocketState>>,
+    namespace: String,
     handshake: Handshake,
 }
 
 impl Socket {
-    pub fn new(handshake: Handshake) -> Self {
+    pub(crate) fn new(handshake: Handshake, namespace: &str) -> Self {
         // don't reuse the Engine.IO id because it's sensitive information
         let id = Self::generate_id();
         // TODO: handle the on_connect logic here:  join() and packet() to send the connect packet
         Socket {
             id,
-            state: Arc::new(RwLock::new(SocketState::new())),
+            state: Arc::new(Mutex::new(SocketState::new())),
             handshake,
+            namespace: namespace.to_owned(),
         }
     }
 

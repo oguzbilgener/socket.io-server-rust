@@ -1,8 +1,9 @@
+use crate::connection::{AddToNamespaceResult, Connection, DecodeBinaryResult};
 use crate::namespace::{
     DynamicNamespace, DynamicNamespaceNameMatchFn, Namespace, NamespaceDescriptor, NamespaceEvent,
     NamespaceKind, SimpleNamespace,
 };
-use crate::socket::{Handshake, Socket};
+use crate::socket::Handshake;
 use crate::storage::Storage;
 use core::default::Default;
 use dashmap::DashMap;
@@ -17,33 +18,26 @@ use socket_io_parser::encoder::Encoder;
 use socket_io_parser::engine_io_parser::EnginePacketData;
 use socket_io_parser::packet::{Packet, PacketDataValue, PacketType, ProtoPacket};
 use socket_io_parser::Parser;
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::broadcast;
 
-pub struct ServerState<D, S>
+pub struct ServerState<S>
 where
-    D: 'static + Decoder,
     S: 'static + Storage,
 {
-    namespaces: HashMap<String, Arc<SimpleNamespace<S>>>,
     dynamic_namespaces: Vec<(Box<DynamicNamespaceNameMatchFn>, Arc<DynamicNamespace<S>>)>,
-    decoders_in_progress: HashMap<String, D>,
     event_receiver_temp: Option<broadcast::Receiver<ServerEvent>>,
 }
 
-impl<D, S> ServerState<D, S>
+impl<S> ServerState<S>
 where
-    D: 'static + Decoder,
     S: 'static + Storage,
 {
     fn new(event_receiver: broadcast::Receiver<ServerEvent>) -> Self {
         ServerState {
-            namespaces: HashMap::new(),
             dynamic_namespaces: Vec::new(),
-            decoders_in_progress: HashMap::new(),
             event_receiver_temp: Some(event_receiver),
         }
     }
@@ -114,19 +108,32 @@ pub enum ClientEvent {
     Error,
 }
 
+pub struct Shared<A, S, P>
+where
+    A: 'static + Adapter,
+    S: 'static + Storage,
+    P: 'static + Parser,
+{
+    adapter: A,
+    storage: S,
+    state: RwLock<ServerState<S>>,
+    /// The main place that all the connected clients are stored. engine_connection_id => Connection
+    connections: DashMap<String, Connection<S, P::Decoder>>,
+    /// A mapping of name => Namespace
+    namespaces: DashMap<String, Arc<SimpleNamespace<S>>>,
+    /// A mapping of socket_id => engine_connection_id
+    connection_lookup: DashMap<String, String>,
+    event_sender: broadcast::Sender<ServerEvent>,
+}
+
 pub struct Server<A, S, P>
 where
     A: 'static + Adapter,
     S: 'static + Storage,
     P: 'static + Parser,
 {
-    adapter: Arc<A>,
-    storage: Arc<S>,
+    shared: Arc<Shared<A, S, P>>,
     socketio_options: ServerOptions,
-    state: Arc<RwLock<ServerState<P::Decoder, S>>>,
-    /// The main place that all the connected clients are stored
-    sockets: Arc<DashMap<String, Socket>>,
-    event_sender: broadcast::Sender<ServerEvent>,
 }
 
 impl<A, S, P> Server<A, S, P>
@@ -140,23 +147,34 @@ where
         let (event_sender, event_receiver) = broadcast::channel::<ServerEvent>(
             options.socketio_options.buffer_factor * BUFFER_CONST,
         );
-        Server {
-            adapter: Arc::new(adapter),
-            storage: Arc::new(storage),
-            socketio_options: options.socketio_options,
-            state: Arc::new(RwLock::new(ServerState::new(event_receiver))),
-            sockets: Arc::new(DashMap::new()),
+        let shared = Shared {
+            adapter,
+            storage,
+            state: RwLock::new(ServerState::new(event_receiver)),
+            connections: DashMap::new(),
+            namespaces: DashMap::new(),
+            connection_lookup: DashMap::new(),
             event_sender,
+        };
+        Server {
+            shared: Arc::new(shared),
+            socketio_options: options.socketio_options,
         }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
-        let event_receiver_temp = self.state.write().unwrap().event_receiver_temp.take();
+        let event_receiver_temp = self
+            .shared
+            .state
+            .write()
+            .unwrap()
+            .event_receiver_temp
+            .take();
         if let Some(event_receiver) = event_receiver_temp {
-            self.subscribe_to_engine_events();
+            self.shared.clone().subscribe_to_engine_events();
             event_receiver
         } else {
-            self.event_sender.subscribe()
+            self.shared.event_sender.subscribe()
         }
     }
 
@@ -177,75 +195,8 @@ where
         todo!();
     }
 
-    fn subscribe_to_engine_events(&self) {
-        let mut engine_event_listener = self.adapter.subscribe();
-        let state = self.state.clone();
-        let server_event_sender = self.event_sender.clone();
-        let adapter = self.adapter.clone();
-        let sockets = self.sockets.clone();
-
-        tokio::spawn(async move {
-            while let Ok((message, mut responder)) = engine_event_listener.recv().await {
-                let adapter = adapter.clone();
-                let state = state.clone();
-                let server_event_sender = server_event_sender.clone();
-                let sockets = sockets.clone();
-                tokio::spawn(async move {
-                    match message {
-                        // socket.io/lib/index.ts :: onconnection
-                        EngineEvent::Connection { connection_id } => {
-                            dbg!("new engine connection from {}!", &connection_id);
-                            setup_connect_timer(connection_id).await;
-                            let _ = responder.respond(None);
-                        }
-                        EngineEvent::Close {
-                            connection_id,
-                            reason,
-                        } => {
-                            dbg!(
-                                "engine socket disconnected id: {}, reason: {}",
-                                &connection_id,
-                                &reason
-                            );
-                            handle_engine_socket_close::<A, S, P>(state, sockets, connection_id);
-                            let _ = responder.respond(None);
-                        }
-                        // socket.io/lib/client.ts :: ondata
-                        EngineEvent::Message {
-                            connection_id,
-                            context,
-                            data,
-                        } => {
-                            handle_new_message::<A, S, P>(
-                                adapter,
-                                state,
-                                context,
-                                sockets,
-                                connection_id,
-                                data,
-                                server_event_sender.clone(),
-                                responder,
-                            )
-                            .await
-                        }
-                        // socket.io/lib/client.ts :: onerror
-                        EngineEvent::Error { connection_id } => {
-                            // TODO: provide more details about the error
-                            let _ = responder.respond(None);
-                            adapter.close_socket(&connection_id).await;
-                        }
-                        _ => {
-                            // TODO: what to do with other events?
-                            let _ = responder.respond(None);
-                        }
-                    }
-                });
-            }
-        });
-    }
-
     pub fn get_namespace(&self, name: &str) -> Arc<SimpleNamespace<S>> {
-        get_or_create_namespace(self.state.clone(), name).0
+        self.shared.clone().get_or_create_namespace(name).0
     }
 
     pub fn make_dynamic_namespace(
@@ -264,8 +215,8 @@ where
             }
         };
         let dynamic_namespace = Arc::new(DynamicNamespace::new());
-        let state = self.state.clone();
-        state
+        self.shared
+            .state
             .write()
             .unwrap()
             .dynamic_namespaces
@@ -279,369 +230,363 @@ where
             _ => NamespaceKind::Dynamic(self.make_dynamic_namespace(namespace_descriptor)),
         }
     }
+
+    pub fn join_room(&self, socket_id: &str, room_name: &str) {
+        todo!()
+    }
 }
 
-pub async fn handle_new_message<A, S, P>(
-    adapter: Arc<A>,
-    state: Arc<RwLock<ServerState<P::Decoder, S>>>,
-    context: Arc<RequestContext>,
-    sockets: Arc<DashMap<String, Socket>>,
-    engine_connection_id: String,
-    data: EnginePacketData,
-    server_event_sender: broadcast::Sender<ServerEvent>,
-    responder: bmrng::Responder<Option<Vec<EnginePacket>>>,
-) where
+impl<A, S, P> Shared<A, S, P>
+where
     A: 'static + Adapter,
     S: 'static + Storage,
     P: 'static + Parser,
 {
-    println!("new message from {} {:?}", engine_connection_id, data);
-    match data {
-        EnginePacketData::Text(text) => {
-            let proto_packet = match P::Decoder::decode_proto_packet(&text) {
-                Ok(p) => p,
-                Err(err) => {
-                    // TODO: should we send this error? check original implementation
-                    let _ = server_event_sender.send(ServerEvent::Error {
-                        message: "Bad packet".to_owned(),
-                    });
-                    return;
-                }
-            };
-
-            match proto_packet {
-                ProtoPacket::Multipart(header) => {
-                    if header.has_attachments() {
-                        let mut state = state.write().unwrap();
-                        if state
-                            .decoders_in_progress
-                            .contains_key(&engine_connection_id)
-                        {
-                            // TODO: is this good enough?
-                            handle_message_processing_error(responder);
-                            let _ = server_event_sender.send(ServerEvent::Error {
-                                message: "sequence error".to_owned(),
-                            });
-                        } else {
-                            state
-                                .decoders_in_progress
-                                .insert(engine_connection_id, P::Decoder::new(header));
-                        }
-                    } else {
-                        // TODO: Ignore this? or log this"
-                        //  binary_event or binary_ack packet with no attachment.
-                        println!("binary packet has no attachments");
-                    }
-                }
-                ProtoPacket::Plain(packet) => {
-                    // "ondecoded" from client.ts
-                    handle_packet_from_client::<A, S, P>(
-                        adapter.clone(),
-                        state,
-                        context,
-                        sockets,
-                        engine_connection_id,
-                        packet,
-                        server_event_sender,
-                        responder,
-                    )
-                    .await;
-                }
-            }
+    fn get_or_create_namespace(
+        self: Arc<Self>,
+        name: &str,
+    ) -> (Arc<SimpleNamespace<S>>, GetResult) {
+        let name = if !name.starts_with('/') {
+            "/".to_owned() + name
+        } else {
+            name.to_owned()
+        };
+        // let mut state = self.state.write().unwrap();
+        let namespace = self.namespaces.get(&name);
+        if let Some(namespace) = namespace {
+            (namespace.clone(), GetResult::Existing)
+        } else {
+            let namespace = Arc::new(SimpleNamespace::<S>::new(name.clone()));
+            self.namespaces.insert(name, namespace.clone());
+            (namespace, GetResult::New)
         }
-        EnginePacketData::Binary(buffer) => {
-            let server_state = state.clone();
-            let decoded = state
-                .write()
-                .unwrap()
-                .decoders_in_progress
-                .get_mut(&engine_connection_id)
-                .ok_or(P::Decoder::make_err())
-                .and_then(|d| d.decode_binary_data(buffer));
-            match decoded {
-                Ok(done) => {
-                    if done {
-                        let decoder = state
-                            .write()
-                            .unwrap()
-                            .decoders_in_progress
-                            .remove(&engine_connection_id)
-                            .unwrap();
-                        let packet = decoder.collect_packet().unwrap();
-                        // another "ondecoded" from client.ts
-                        handle_packet_from_client::<A, S, P>(
-                            adapter,
-                            server_state,
+    }
+
+    fn subscribe_to_engine_events(self: Arc<Self>) {
+        let mut engine_event_listener = self.clone().adapter.subscribe();
+
+        tokio::spawn(async move {
+            let shared = self.clone();
+            while let Ok((message, responder)) = engine_event_listener.recv().await {
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    match message {
+                        // socket.io/lib/index.ts :: onconnection
+                        EngineEvent::Connection { connection_id } => {
+                            dbg!("new engine connection from {}!", &connection_id);
+                            shared.clone().setup_connect_timer(connection_id).await;
+                        }
+                        EngineEvent::Close {
+                            connection_id,
+                            reason,
+                        } => {
+                            dbg!(
+                                "engine socket disconnected id: {}, reason: {}",
+                                &connection_id,
+                                &reason
+                            );
+                            shared.clone().handle_engine_socket_close(&connection_id);
+                        }
+                        // socket.io/lib/client.ts :: ondata
+                        EngineEvent::Message {
+                            connection_id,
                             context,
-                            sockets,
+                            data,
+                        } => {
+                            shared
+                                .clone()
+                                .handle_new_message(context, connection_id, data, responder)
+                                .await
+                        }
+                        // socket.io/lib/client.ts :: onerror
+                        EngineEvent::Error { connection_id } => {
+                            // TODO: provide more details about the error
+                            shared.clone().adapter.close_socket(&connection_id).await;
+                        }
+                        _ => {
+                            // TODO: what to do with other events?
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn handle_engine_socket_close(self: Arc<Self>, engine_connection_id: &str) {
+        if self.remove_connection(engine_connection_id) {
+            dbg!(
+                "Handled socket close for connection_id = {:?}",
+                engine_connection_id
+            );
+        } else {
+            dbg!("Attempted to remove socket record for connection_id = {:?} but no record was found", engine_connection_id);
+        }
+    }
+
+    pub async fn handle_new_message(
+        self: Arc<Self>,
+        context: Arc<RequestContext>,
+        engine_connection_id: String,
+        data: EnginePacketData,
+        responder: bmrng::Responder<Vec<EnginePacket>>,
+    ) {
+        println!("new message from {} {:?}", engine_connection_id, data);
+        match data {
+            EnginePacketData::Text(text) => {
+                let proto_packet = match P::Decoder::decode_proto_packet(&text) {
+                    Ok(p) => p,
+                    Err(_err) => {
+                        // TODO: should we send this error? check original implementation
+                        let _ = self.event_sender.send(ServerEvent::Error {
+                            message: "Bad packet".to_owned(),
+                        });
+                        return;
+                    }
+                };
+
+                match proto_packet {
+                    ProtoPacket::Multipart(header) => {
+                        if header.has_attachments() {
+                            if let Some(connection) =
+                                self.clone().connections.get(&engine_connection_id)
+                            {
+                                if let Err(_err) = connection.set_decoder(P::Decoder::new(header)) {
+                                    // TODO: is this good enough?
+                                    let _ = self.event_sender.send(ServerEvent::Error {
+                                        message: "sequence error".to_owned(),
+                                    });
+                                }
+                            } else {
+                                // TODO: propagate error? respond with error?
+                                println!("connection not found");
+                            }
+                        } else {
+                            // TODO: Ignore this? or log this"
+                            //  binary_event or binary_ack packet with no attachment.
+                            println!("binary packet has no attachments");
+                        }
+                    }
+                    ProtoPacket::Plain(packet) => {
+                        // "ondecoded" from client.ts
+                        self.handle_packet_from_client(
+                            context,
                             engine_connection_id,
                             packet,
-                            server_event_sender,
                             responder,
                         )
                         .await;
                     }
                 }
-                Err(err) => {
-                    // TODO: send binary attachment decode error with details
-                    handle_message_processing_error(responder);
+            }
+            EnginePacketData::Binary(buffer) => {
+                if let Some(connection) = self.clone().connections.get(&engine_connection_id) {
+                    match connection.decode_binary_data(buffer) {
+                        Ok(DecodeBinaryResult::Done { packet }) => {
+                            // another "ondecoded" from client.ts
+                            self.handle_packet_from_client(
+                                context,
+                                engine_connection_id,
+                                packet,
+                                responder,
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    dbg!("connection with id {:?} not found", engine_connection_id);
+                }
+            }
+            EnginePacketData::Empty => {
+                // TODO: this is considered unknown. Ignore? or reset the buffer?
+            }
+        }
+    }
+
+    /// Returns a packet to be sent back to the adapter/engine.io layer
+    async fn handle_client_connect(
+        self: Arc<Self>,
+        context: Arc<RequestContext>,
+        namespace_name: String,
+        engine_connection_id: String,
+        auth: PacketDataValue,
+    ) -> Packet {
+        let connect_result = if self.clone().namespace_exists(&namespace_name) {
+            Ok(self.connect_client(
+                context.clone(),
+                &namespace_name,
+                &engine_connection_id,
+                auth,
+            ))
+        } else {
+            if let Some(_dynamic_namespace) = self
+                .clone()
+                .get_matching_dynamic_namespace(&namespace_name, &auth)
+                .await
+            {
+                Ok(self.connect_client(
+                    context.clone(),
+                    &namespace_name,
+                    &engine_connection_id,
+                    auth,
+                ))
+            } else {
+                // TODO: proper error types!
+                Err("Invalid namespace")
+            }
+        };
+
+        match connect_result {
+            Ok((namespace, socket_id)) => Packet {
+                packet_type: PacketType::Connect,
+                id: None,
+                nsp: namespace.get_name().to_owned(),
+                data: serde_json::json!({
+                    "sid": socket_id,
+                })
+                .into(),
+            },
+            Err(err_message) => Packet {
+                packet_type: PacketType::ConnectError,
+                nsp: namespace_name,
+                data: json!({ "message": err_message }).into(),
+                id: None,
+            },
+        }
+    }
+
+    // `ondecoded` from client.ts
+    async fn handle_packet_from_client(
+        self: Arc<Self>,
+        context: Arc<RequestContext>,
+        engine_connection_id: String,
+        packet: Packet,
+        mut responder: bmrng::Responder<Vec<EnginePacket>>,
+    ) {
+        match packet.packet_type {
+            PacketType::Connect => {
+                // CONNECT or CONNECT_ERROR packet
+                let connect_packet = self
+                    .handle_client_connect(context, packet.nsp, engine_connection_id, packet.data)
+                    .await;
+                let encoded_packet = P::Encoder::encode_packet(connect_packet);
+                let _ = responder.respond(encoded_packet.into());
+            }
+            _ => {
+                dbg!("new socket.io packet from the client! {:?}", &packet);
+                if let Some(namespace) = self.namespaces.get(&packet.nsp) {
+                    namespace.on_packet_from_client(packet)
+                } else {
+                    dbg!("No namespace found for nsp {:?}", &packet.nsp);
                 }
             }
         }
-        EnginePacketData::Empty => {
-            // TODO: this is considered unknown. Ignore? or reset the buffer?
-        }
     }
-}
 
-fn handle_engine_socket_close<A, S, P>(
-    state: Arc<RwLock<ServerState<P::Decoder, S>>>,
-    sockets: Arc<DashMap<String, Socket>>,
-    engine_connection_id: String,
-) where
-    A: 'static + Adapter,
-    S: 'static + Storage,
-    P: 'static + Parser,
-{
-}
+    /// socket.io/lib/client.ts :: doConnect
+    fn connect_client(
+        self: Arc<Self>,
+        context: Arc<RequestContext>,
+        namespace_name: &String,
+        engine_connection_id: &String,
+        auth: PacketDataValue,
+    ) -> (Arc<SimpleNamespace<S>>, String) {
+        self.clone().clear_connect_timer(engine_connection_id);
+        let namespace = self.clone().get_or_create_namespace(namespace_name).0;
+        let handshake = Handshake::new(&context, auth);
+        let socket_id = self.add_connection(namespace.clone(), engine_connection_id, handshake);
+        (namespace, socket_id)
+    }
 
-// `ondecoded` from client.ts
-async fn handle_packet_from_client<A, S, P>(
-    adapter: Arc<A>,
-    state: Arc<RwLock<ServerState<P::Decoder, S>>>,
-    context: Arc<RequestContext>,
-    sockets: Arc<DashMap<String, Socket>>,
-    engine_connection_id: String,
-    packet: Packet,
-    server_event_sender: broadcast::Sender<ServerEvent>,
-    mut responder: bmrng::Responder<Option<Vec<EnginePacket>>>,
-) where
-    A: 'static + Adapter,
-    S: 'static + Storage,
-    P: 'static + Parser,
-{
-    match packet.packet_type {
-        PacketType::Connect => {
-            // CONNECT or CONNECT_ERROR packet
-            let connect_packet = handle_client_connect(
-                state.clone(),
-                sockets,
-                packet.nsp,
-                engine_connection_id,
-                context,
-                packet.data,
-            )
-            .await;
-            let encoded_packet = P::Encoder::encode_packet(connect_packet);
-            let _ = responder.respond(Some(encoded_packet.into()));
+    fn namespace_exists(self: Arc<Self>, name: &str) -> bool {
+        self.namespaces.contains_key(name)
+    }
+
+    /// `server._checkNamespace()` in the original implementation
+    async fn get_matching_dynamic_namespace(
+        self: Arc<Self>,
+        namespace_name: &str,
+        auth: &PacketDataValue,
+    ) -> Option<Arc<DynamicNamespace<S>>> {
+        let state_ref = self.clone();
+        let dynamic_namespaces = &state_ref.state.read().unwrap().dynamic_namespaces;
+        if dynamic_namespaces.is_empty() {
+            return None;
         }
-        _ => {
-            dbg!("new socket.io packet from the client! {:?}", &packet);
-            // TODO: Avoid using a global lock here, use DashMap
-            let state = state.read().unwrap();
-            if let Some(namespace) = state.namespaces.get(&packet.nsp) {
-                namespace.on_packet_from_client(packet)
-            } else {
-                dbg!("No namespace found for nsp {:?}", &packet.nsp);
+        let dynamic_namespace = dynamic_namespaces
+            .iter()
+            .find(move |(check_fn, _)| check_fn(namespace_name, auth))
+            .map(|dynamic_namespace| dynamic_namespace.1.clone());
+
+        if let Some(ref dynamic_namespace) = dynamic_namespace {
+            let (simple_namespace, get_result) = self.get_or_create_namespace(&namespace_name);
+            if get_result == GetResult::New {
+                // This part is akin to `parent-namespace.ts/createChild()`
+                // TODO: hook up this simple nsp to the dynamic nsp
+                dynamic_namespace.connect_simple_namespace(simple_namespace);
             }
-            let _ = responder.respond(None);
         }
+        dynamic_namespace
     }
-}
 
-/// Returns a packet to be sent back to the adapter/engine.io layer
-async fn handle_client_connect<D, S>(
-    state: Arc<RwLock<ServerState<D, S>>>,
-    sockets: Arc<DashMap<String, Socket>>,
-    namespace_name: String,
-    engine_connection_id: String,
-    context: Arc<RequestContext>,
-    auth: PacketDataValue,
-) -> Packet
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    let connect_result = if namespace_exists(state.clone(), &namespace_name) {
-        Ok(connect_client_to_namespace(
-            state.clone(),
-            sockets,
-            &namespace_name,
-            &engine_connection_id,
-            context.clone(),
-            auth,
-        )
-        .await)
-    } else {
-        if let Some(dynamic_namespace) =
-            get_matching_dynamic_namespace(state.clone(), &namespace_name, &auth).await
+    /// Connects a client to a namespace
+    /// Returns the new socket id
+    fn add_connection(
+        self: Arc<Self>,
+        namespace: Arc<SimpleNamespace<S>>,
+        engine_connection_id: &str,
+        handshake: Handshake,
+    ) -> String {
+        let socket_id = if let Some(existing_connection) =
+            self.connections.get(engine_connection_id)
         {
-            Ok(connect_client_to_namespace(
-                state.clone(),
-                sockets,
-                &namespace_name,
-                &engine_connection_id,
-                context.clone(),
-                auth,
-            )
-            .await)
+            match existing_connection.add_to_namespace(handshake, namespace.clone()) {
+                AddToNamespaceResult::Added { socket_id } => {
+                    dbg!(
+                        "Created a new socket, joined namespace, socket_id = {:?}, name = {:?}",
+                        &socket_id,
+                        namespace.get_name()
+                    );
+                    socket_id
+                }
+                AddToNamespaceResult::AlreadyExisting { socket_id } => {
+                    dbg!("Attempted to add a connection that's already connected to a namespace. connection_id = {:?}, namespace = {:?}", engine_connection_id, namespace.get_name());
+                    socket_id
+                }
+            }
         } else {
-            Err("Invalid namespace")
-        }
-    };
-
-    match connect_result {
-        Ok((namespace, socket_id)) => Packet {
-            packet_type: PacketType::Connect,
-            id: None,
-            nsp: namespace.get_name().to_owned(),
-            data: serde_json::json!({
-                "sid": socket_id,
-            })
-            .into(),
-        },
-        Err(err_message) => Packet {
-            packet_type: PacketType::ConnectError,
-            nsp: namespace_name,
-            data: json!({ "message": err_message }).into(),
-            id: None,
-        },
+            let (connection, socket_id) = Connection::<S, P::Decoder>::initialize(
+                engine_connection_id,
+                handshake,
+                namespace.clone(),
+            );
+            socket_id
+        };
+        self.connection_lookup
+            .insert(socket_id.clone(), engine_connection_id.to_owned());
+        socket_id
     }
-}
 
-fn handle_message_processing_error(mut responder: bmrng::Responder<Option<Vec<EnginePacket>>>) {
-    let _ = responder.respond(None);
-}
-
-/// socket.io/lib/client.ts :: doConnect
-async fn connect_client_to_namespace<D, S>(
-    state: Arc<RwLock<ServerState<D, S>>>,
-    sockets: Arc<DashMap<String, Socket>>,
-    namespace_name: &String,
-    engine_connection_id: &String,
-    context: Arc<RequestContext>,
-    auth: PacketDataValue,
-) -> (Arc<SimpleNamespace<S>>, String)
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    clear_connect_timer(state.clone(), engine_connection_id).await;
-    let namespace = get_or_create_namespace(state, namespace_name).0;
-    let handshake = Handshake::new(&context, auth);
-    let socket_id = add_connection(sockets, namespace.clone(), handshake);
-    (namespace, socket_id)
-}
-
-fn namespace_exists<D, S>(state: Arc<RwLock<ServerState<D, S>>>, name: &str) -> bool
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    state.read().unwrap().namespaces.contains_key(name)
-}
-
-/// `server._checkNamespace()` in the original implementation
-async fn get_matching_dynamic_namespace<D, S>(
-    state: Arc<RwLock<ServerState<D, S>>>,
-    namespace_name: &str,
-    auth: &PacketDataValue,
-) -> Option<Arc<DynamicNamespace<S>>>
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    let dynamic_namespaces = &state.read().unwrap().dynamic_namespaces;
-    if dynamic_namespaces.is_empty() {
-        return None;
-    }
-    let dynamic_namespace = dynamic_namespaces
-        .iter()
-        .find(move |(check_fn, _)| check_fn(namespace_name, auth))
-        .map(|dynamic_namespace| dynamic_namespace.1.clone());
-
-    if let Some(ref dynamic_namespace) = dynamic_namespace {
-        let (simple_namespace, get_result) =
-            get_or_create_namespace(state.clone(), &namespace_name);
-        if get_result == GetResult::New {
-            // This part is akin to `parent-namespace.ts/createChild()`
-            // TODO: hook up this simple nsp to the dynamic nsp
-            dynamic_namespace.connect_simple_namespace(simple_namespace);
+    fn remove_connection(self: Arc<Self>, engine_connection_id: &str) -> bool {
+        if let Some((_, mut connection)) = self.connections.remove(engine_connection_id) {
+            connection.iter_socket_ids_mut().for_each(|socket_id| {
+                self.connection_lookup.remove(socket_id);
+            });
+            // The rest of the cleanup (for namespaces is done in the destructor for the connection state)
+            true
+        } else {
+            false
         }
     }
-    dynamic_namespace
-}
 
-fn get_or_create_namespace<D, S>(
-    state: Arc<RwLock<ServerState<D, S>>>,
-    name: &str,
-) -> (Arc<SimpleNamespace<S>>, GetResult)
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    let name = if !name.starts_with('/') {
-        "/".to_owned() + name
-    } else {
-        name.to_owned()
-    };
-    let mut state = state.write().unwrap();
-    let namespace = state.namespaces.get(&name);
-    if let Some(namespace) = namespace {
-        (namespace.clone(), GetResult::Existing)
-    } else {
-        let namespace = Arc::new(SimpleNamespace::<S>::new(name.clone()));
-        state.namespaces.insert(name, namespace.clone());
-        (namespace, GetResult::New)
+    async fn setup_connect_timer(self: Arc<Self>, connection_id: String) {
+        // TODO: complete this
+        todo!();
     }
-}
 
-/// Returns the new socket id
-fn add_connection<S>(
-    sockets: Arc<DashMap<String, Socket>>,
-    namespace: Arc<SimpleNamespace<S>>,
-    handshake: Handshake,
-) -> String
-where
-    S: 'static + Storage,
-{
-    let socket = Socket::new(handshake);
-    let socket_id = socket.id.clone();
-
-    // Assuming the client is still connected. If there is a disconnect event,
-    // it should be coming from the same event queue (ClientEvent)
-    namespace.join_socket(&socket_id, &socket_id);
-
-    namespace.send_event(NamespaceEvent::Connection {
-        socket_id: socket_id.clone(),
-    });
-    sockets.insert(socket_id.clone(), socket);
-    socket_id
-}
-
-fn remove_connection<S>(
-    sockets: DashMap<String, Socket>,
-    namespace: Arc<SimpleNamespace<S>>,
-    socket_id: &str,
-) where
-    S: 'static + Storage,
-{
-    namespace.leave_socket(socket_id, socket_id);
-    sockets.remove(socket_id);
-    // TODO: anything else?
-}
-
-async fn setup_connect_timer(connection_id: String) {
-    // TODO: complete this
-    todo!();
-}
-
-async fn clear_connect_timer<D, S>(state: Arc<RwLock<ServerState<D, S>>>, connection_id: &str)
-where
-    D: 'static + Decoder,
-    S: 'static + Storage,
-{
-    todo!()
+    fn clear_connect_timer(self: Arc<Self>, connection_id: &str) {
+        todo!()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]

@@ -5,6 +5,7 @@ pub mod server;
 pub mod storage;
 pub mod namespace;
 pub mod socket;
+pub mod connection;
 
 #[cfg(test)]
 mod tests {

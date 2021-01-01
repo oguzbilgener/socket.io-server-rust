@@ -4,6 +4,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Display;
+use std::fmt;
 
 use crate::packet::{
     get_attachment_index_if_placeholder, BinaryPacketType, MultipartPacketHeader, Packet,
@@ -47,7 +48,32 @@ impl<E> From<nom::Err<E>> for HandleEngineMessageError {
     }
 }
 
-pub trait Decoder: 'static + Send + Sync + Sized {
+#[derive(Debug, Clone)]
+pub enum DecodeError<D>
+where
+    D: 'static + Decoder,
+{
+    InvalidDecoderState,
+    DecodeFailed(D::HandleError),
+}
+
+impl<D> fmt::Display for DecodeError<D>
+where
+    D: 'static + Decoder,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecodeError::InvalidDecoderState => {
+                write!(f, "Decoder is in an invalid state for this connection")
+            }
+            DecodeError::DecodeFailed(err) => write!(f, "Decode failed: {}", err),
+        }
+    }
+}
+
+impl<D> std::error::Error for DecodeError<D> where D: 'static + Decoder + Debug {}
+
+pub trait Decoder: 'static + Send + Sync + Sized + Debug {
     type HandleError: Debug + Display + From<serde_json::Error> + Sync + Send;
 
     fn new(packet_header: MultipartPacketHeader) -> Self;
@@ -62,6 +88,7 @@ pub trait Decoder: 'static + Send + Sync + Sized {
     fn make_err() -> Self::HandleError;
 }
 
+#[derive(Debug)]
 pub struct DefaultDecoder {
     header: MultipartPacketHeader,
     buffer: Vec<Bytes>,

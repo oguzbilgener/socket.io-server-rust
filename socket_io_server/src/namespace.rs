@@ -51,8 +51,14 @@ pub trait Namespace {
     fn get_name(&self) -> &str;
     fn subscribe(&self) -> broadcast::Receiver<NamespaceEvent>;
     fn to(self: Self, room_name: String) -> Self;
-    fn join_socket(&self, socket_id: &str, room: &str);
-    fn leave_socket(&self, socket_id: &str, room: &str);
+    /// Add socket to the namespace
+    fn add_socket(&self, socket_id: &str);
+    /// Add socket to the namespace if it isn't in already, and
+    fn add_socket_to_room(&self, socket_id: &str, room: &str);
+    /// Remove socket from this namespace completely
+    fn remove_socket(&self, socket_id: &str);
+    /// Remove socket from a room given by the name
+    fn remove_socket_from_room(&self, socket_id: &str, room: &str);
 }
 
 pub struct SimpleNamespace<S>
@@ -91,7 +97,10 @@ where
         todo!()
     }
 
-    pub(crate) fn send_event(&self, event: NamespaceEvent) -> Result<usize, broadcast::SendError<NamespaceEvent>> {
+    pub(crate) fn send_event(
+        &self,
+        event: NamespaceEvent,
+    ) -> Result<usize, broadcast::SendError<NamespaceEvent>> {
         self.event_sender.send(event)
     }
 }
@@ -113,13 +122,24 @@ where
         self
     }
 
-    fn join_socket(&self, socket_id: &str, room: &str) {
+    fn add_socket_to_room(&self, socket_id: &str, room: &str) {
         self.storage.add_all(socket_id, new_hash_set_from_str(room));
         self.socket_ids.insert(socket_id.to_owned());
+        let _ = self.send_event(NamespaceEvent::Connection {
+            socket_id: socket_id.to_owned(),
+        });
     }
 
-    fn leave_socket(&self, socket_id: &str, room: &str) {
+    fn add_socket(&self, socket_id: &str) {
+        self.add_socket_to_room(socket_id, socket_id)
+    }
+
+    fn remove_socket(&self, socket_id: &str) {
         self.socket_ids.remove(socket_id);
+        self.storage.del(socket_id, socket_id);
+    }
+
+    fn remove_socket_from_room(&self, socket_id: &str, room: &str) {
         self.storage.del(socket_id, room);
     }
 }
@@ -173,11 +193,19 @@ where
         todo!()
     }
 
-    fn join_socket(&self, socket_id: &str, room: &str) {
+    fn add_socket_to_room(&self, socket_id: &str, room: &str) {
         todo!()
     }
 
-    fn leave_socket(&self, socket_id: &str, room: &str) {
+    fn add_socket(&self, socket_id: &str) {
+        todo!()
+    }
+
+    fn remove_socket_from_room(&self, socket_id: &str, room: &str) {
+        todo!()
+    }
+
+    fn remove_socket(&self, socket_id: &str) {
         todo!()
     }
 }
