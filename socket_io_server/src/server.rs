@@ -1,4 +1,4 @@
-use crate::connection::{AddToNamespaceResult, Connection, DecodeBinaryResult};
+use crate::connection::{AddToNamespaceSuccess, Connection, DecodeBinarySuccess};
 use crate::namespace::{
     DynamicNamespace, DynamicNamespaceNameMatchFn, Namespace, NamespaceDescriptor, NamespaceEvent,
     NamespaceKind, SimpleNamespace,
@@ -115,7 +115,6 @@ where
     P: 'static + Parser,
 {
     adapter: A,
-    storage: S,
     state: RwLock<ServerState<S>>,
     /// The main place that all the connected clients are stored. engine_connection_id => Connection
     connections: DashMap<String, Connection<S, P::Decoder>>,
@@ -142,14 +141,13 @@ where
     S: 'static + Storage,
     P: 'static + Parser,
 {
-    pub fn new(options: Options<A>, storage: S) -> Self {
+    pub fn new(options: Options<A>) -> Self {
         let adapter = A::new(options.engine_options, options.adapter_options);
         let (event_sender, event_receiver) = broadcast::channel::<ServerEvent>(
             options.socketio_options.buffer_factor * BUFFER_CONST,
         );
         let shared = Shared {
             adapter,
-            storage,
             state: RwLock::new(ServerState::new(event_receiver)),
             connections: DashMap::new(),
             namespaces: DashMap::new(),
@@ -232,6 +230,7 @@ where
     }
 
     pub fn join_room(&self, socket_id: &str, room_name: &str) {
+        // TODO: how to implement this?
         todo!()
     }
 }
@@ -251,7 +250,6 @@ where
         } else {
             name.to_owned()
         };
-        // let mut state = self.state.write().unwrap();
         let namespace = self.namespaces.get(&name);
         if let Some(namespace) = namespace {
             (namespace.clone(), GetResult::Existing)
@@ -381,7 +379,7 @@ where
             EnginePacketData::Binary(buffer) => {
                 if let Some(connection) = self.clone().connections.get(&engine_connection_id) {
                     match connection.decode_binary_data(buffer) {
-                        Ok(DecodeBinaryResult::Done { packet }) => {
+                        Ok(DecodeBinarySuccess::Done { packet }) => {
                             // another "ondecoded" from client.ts
                             self.handle_packet_from_client(
                                 context,
@@ -474,10 +472,11 @@ where
             }
             _ => {
                 dbg!("new socket.io packet from the client! {:?}", &packet);
-                if let Some(namespace) = self.namespaces.get(&packet.nsp) {
-                    namespace.on_packet_from_client(packet)
+                if let Some(connection) = self.connections.get(&engine_connection_id) {
+                    // TODO: error handling?
+                    connection.handle_packet(packet);
                 } else {
-                    dbg!("No namespace found for nsp {:?}", &packet.nsp);
+                    dbg!("No connection found for engine_connection_id {:?}", &engine_connection_id);
                 }
             }
         }
@@ -522,8 +521,7 @@ where
             let (simple_namespace, get_result) = self.get_or_create_namespace(&namespace_name);
             if get_result == GetResult::New {
                 // This part is akin to `parent-namespace.ts/createChild()`
-                // TODO: hook up this simple nsp to the dynamic nsp
-                dynamic_namespace.connect_simple_namespace(simple_namespace);
+                dynamic_namespace.insert_simple_namespace(simple_namespace);
             }
         }
         dynamic_namespace
@@ -541,7 +539,7 @@ where
             self.connections.get(engine_connection_id)
         {
             match existing_connection.add_to_namespace(handshake, namespace.clone()) {
-                AddToNamespaceResult::Added { socket_id } => {
+                AddToNamespaceSuccess::Added { socket_id } => {
                     dbg!(
                         "Created a new socket, joined namespace, socket_id = {:?}, name = {:?}",
                         &socket_id,
@@ -549,7 +547,7 @@ where
                     );
                     socket_id
                 }
-                AddToNamespaceResult::AlreadyExisting { socket_id } => {
+                AddToNamespaceSuccess::AlreadyExisting { socket_id } => {
                     dbg!("Attempted to add a connection that's already connected to a namespace. connection_id = {:?}, namespace = {:?}", engine_connection_id, namespace.get_name());
                     socket_id
                 }
@@ -560,6 +558,7 @@ where
                 handshake,
                 namespace.clone(),
             );
+            self.connections.insert(engine_connection_id.to_owned(), connection);
             socket_id
         };
         self.connection_lookup

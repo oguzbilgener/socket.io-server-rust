@@ -1,4 +1,4 @@
-use crate::namespace::{Namespace, SimpleNamespace};
+use crate::namespace::{Namespace, NamespacePriv, SimpleNamespace};
 use crate::socket::{Handshake, Socket};
 use crate::storage::Storage;
 use bytes::Bytes;
@@ -23,13 +23,13 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AddToNamespaceResult {
+pub(crate) enum AddToNamespaceSuccess {
     Added { socket_id: String },
     AlreadyExisting { socket_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum DecodeBinaryResult {
+pub(crate) enum DecodeBinarySuccess {
     Done { packet: Packet },
     InProgress,
 }
@@ -48,6 +48,8 @@ where
     S: 'static + Storage,
     D: 'static + Decoder,
 {
+    /// Create a new connection record and the first `Socket` client for the
+    /// given namespace. This socket joins the given namespace.
     pub(crate) fn initialize(
         engine_connection_id: &str,
         handshake: Handshake,
@@ -85,10 +87,10 @@ where
         &self,
         handshake: Handshake,
         namespace: Arc<SimpleNamespace<S>>,
-    ) -> AddToNamespaceResult {
+    ) -> AddToNamespaceSuccess {
         let mut state = self.state.lock().unwrap();
         if state.namespaces.contains_key(namespace.get_name()) {
-            AddToNamespaceResult::AlreadyExisting {
+            AddToNamespaceSuccess::AlreadyExisting {
                 socket_id: state
                     .namespaces
                     .get(namespace.get_name())
@@ -96,7 +98,7 @@ where
                     .expect("Unexpected internal state error"),
             }
         } else {
-            AddToNamespaceResult::Added {
+            AddToNamespaceSuccess::Added {
                 socket_id: Self::create_socket(&mut state, handshake, namespace),
             }
         }
@@ -111,7 +113,7 @@ where
     pub(crate) fn decode_binary_data(
         &self,
         buffer: Bytes,
-    ) -> Result<DecodeBinaryResult, DecodeError<D>> {
+    ) -> Result<DecodeBinarySuccess, DecodeError<D>> {
         let mut state = self.state.lock().unwrap();
         if let Some(mut decoder) = state.decoder.take() {
             let done = decoder
@@ -119,10 +121,10 @@ where
                 .map_err(|err| DecodeError::DecodeFailed(err))?;
             if done {
                 let packet = decoder.collect_packet().unwrap();
-                Ok(DecodeBinaryResult::Done { packet })
+                Ok(DecodeBinarySuccess::Done { packet })
             } else {
                 state.decoder = Some(decoder);
-                Ok(DecodeBinaryResult::InProgress)
+                Ok(DecodeBinarySuccess::InProgress)
             }
         } else {
             Err(DecodeError::InvalidDecoderState)
@@ -136,6 +138,20 @@ where
             Ok(())
         } else {
             Err(DecodeError::InvalidDecoderState)
+        }
+    }
+
+    pub(crate) fn handle_packet(&self, packet: Packet) {
+        // TODO: find the Socket instance and call a method which would trigger its external event listeners
+        let state = self.state.lock().unwrap();
+        if let Some((socket_id, _)) = state.namespaces.get(&packet.nsp) {
+            if let Some(socket) = state.sockets.get(socket_id) {
+                socket.handle_packet(packet);
+            } else {
+                // TODO: should return some kind of an error
+            }
+        } else {
+            // TODO: should return some kind of an error
         }
     }
 }

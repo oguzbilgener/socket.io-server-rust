@@ -1,7 +1,7 @@
-use chrono::{DateTime, Utc};
 use crate::namespace::SimpleNamespace;
+use chrono::{DateTime, Utc};
 use engine_io_server::util::RequestContext;
-use socket_io_parser::packet::PacketDataValue;
+use socket_io_parser::packet::{Packet, PacketType, PacketDataValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,14 +47,11 @@ impl Handshake {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SocketState {
-}
+pub struct SocketState {}
 
 impl SocketState {
     pub fn new() -> Self {
-        SocketState {
-
-        }
+        SocketState {}
     }
 }
 
@@ -89,10 +86,35 @@ impl Socket {
         &self.handshake
     }
 
-    pub fn send_packet() {
+    pub(crate) fn send_packet() {}
 
+    pub(crate) fn handle_packet(&self, packet: Packet) {
+        match packet.packet_type {
+            PacketType::Event => {
+                todo!()
+            },
+            PacketType::BinaryEvent => {
+                todo!()
+            },
+            PacketType::Ack => {
+                todo!()
+            },
+            PacketType::BinaryAck => {
+                todo!()
+            },
+            PacketType::Disconnect => {
+                // TODO: is this a real event?
+                todo!()
+            },
+            PacketType::ConnectError => {
+                todo!()
+            },
+            _ => {
+                // TODO: error with unexpected packet type
+                todo!()
+            }
+        }
     }
 
     // TODO: implement `_onclose` somewhere?
-
 }
